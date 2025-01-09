@@ -1,60 +1,86 @@
-import type {
-    AsyncExactReadable,
-    StructLike,
-    StructValueType,
-} from "@yume-chan/struct";
-import Struct from "@yume-chan/struct";
+import { getUint32LittleEndian } from "@yume-chan/no-data-view";
+import type { AsyncExactReadable, StructLike } from "@yume-chan/struct";
+import { decodeUtf8, string, struct, u32 } from "@yume-chan/struct";
 
-import { decodeUtf8 } from "../../utils/index.js";
-
-export enum AdbSyncResponseId {
-    Entry = "DENT",
-    Entry2 = "DNT2",
-    Lstat = "STAT",
-    Stat = "STA2",
-    Lstat2 = "LST2",
-    Done = "DONE",
-    Data = "DATA",
-    Ok = "OKAY",
-    Fail = "FAIL",
+function encodeAsciiUnchecked(value: string): Uint8Array {
+    const result = new Uint8Array(value.length);
+    for (let i = 0; i < value.length; i += 1) {
+        result[i] = value.charCodeAt(i);
+    }
+    return result;
 }
+
+/**
+ * Encode ID to numbers for faster comparison
+ * @param value A 4-character string
+ * @returns A 32-bit integer by encoding the string as little-endian
+ *
+ * #__NO_SIDE_EFFECTS__
+ */
+export function adbSyncEncodeId(value: string): number {
+    const buffer = encodeAsciiUnchecked(value);
+    return getUint32LittleEndian(buffer, 0);
+}
+
+export const AdbSyncResponseId = {
+    Entry: adbSyncEncodeId("DENT"),
+    Entry2: adbSyncEncodeId("DNT2"),
+    Lstat: adbSyncEncodeId("STAT"),
+    Stat: adbSyncEncodeId("STA2"),
+    Lstat2: adbSyncEncodeId("LST2"),
+    Done: adbSyncEncodeId("DONE"),
+    Data: adbSyncEncodeId("DATA"),
+    Ok: adbSyncEncodeId("OKAY"),
+    Fail: adbSyncEncodeId("FAIL"),
+};
 
 export class AdbSyncError extends Error {}
 
-export const AdbSyncFailResponse = new Struct({ littleEndian: true })
-    .uint32("messageLength")
-    .string("message", { lengthField: "messageLength" })
-    .postDeserialize((object) => {
-        throw new AdbSyncError(object.message);
-    });
+export const AdbSyncFailResponse = struct(
+    { message: string(u32) },
+    {
+        littleEndian: true,
+        postDeserialize(value) {
+            throw new AdbSyncError(value.message);
+        },
+    },
+);
 
 export async function adbSyncReadResponse<T>(
     stream: AsyncExactReadable,
-    id: AdbSyncResponseId,
+    id: number | string,
     type: StructLike<T>,
 ): Promise<T> {
-    const actualId = decodeUtf8(await stream.readExactly(4));
-    switch (actualId) {
+    if (typeof id === "string") {
+        id = adbSyncEncodeId(id);
+    }
+
+    const buffer = await stream.readExactly(4);
+    switch (getUint32LittleEndian(buffer, 0)) {
         case AdbSyncResponseId.Fail:
             await AdbSyncFailResponse.deserialize(stream);
             throw new Error("Unreachable");
         case id:
             return await type.deserialize(stream);
         default:
-            throw new Error(`Expected '${id}', but got '${actualId}'`);
+            throw new Error(
+                `Expected '${id}', but got '${decodeUtf8(buffer)}'`,
+            );
     }
 }
 
-export async function* adbSyncReadResponses<
-    T extends Struct<object, PropertyKey, object, unknown>,
->(
+export async function* adbSyncReadResponses<T>(
     stream: AsyncExactReadable,
-    id: AdbSyncResponseId,
-    type: T,
-): AsyncGenerator<StructValueType<T>, void, void> {
+    id: number | string,
+    type: StructLike<T>,
+): AsyncGenerator<T, void, void> {
+    if (typeof id === "string") {
+        id = adbSyncEncodeId(id);
+    }
+
     while (true) {
-        const actualId = decodeUtf8(await stream.readExactly(4));
-        switch (actualId) {
+        const buffer = await stream.readExactly(4);
+        switch (getUint32LittleEndian(buffer, 0)) {
             case AdbSyncResponseId.Fail:
                 await AdbSyncFailResponse.deserialize(stream);
                 throw new Error("Unreachable");
@@ -66,11 +92,11 @@ export async function* adbSyncReadResponses<
                 await stream.readExactly(type.size);
                 return;
             case id:
-                yield (await type.deserialize(stream)) as StructValueType<T>;
+                yield await type.deserialize(stream);
                 break;
             default:
                 throw new Error(
-                    `Expected '${id}' or '${AdbSyncResponseId.Done}', but got '${actualId}'`,
+                    `Expected '${id}' or '${AdbSyncResponseId.Done}', but got '${decodeUtf8(buffer)}'`,
                 );
         }
     }

@@ -1,5 +1,4 @@
-import { AutoDisposable } from "@yume-chan/event";
-import type { Consumable, ReadableStream } from "@yume-chan/stream-extra";
+import type { MaybeConsumable, ReadableStream } from "@yume-chan/stream-extra";
 
 import type { Adb, AdbSocket } from "../../adb.js";
 import { AdbFeature } from "../../features.js";
@@ -9,6 +8,7 @@ import type { AdbSyncEntry } from "./list.js";
 import { adbSyncOpenDir } from "./list.js";
 import { adbSyncPull } from "./pull.js";
 import { adbSyncPush } from "./push.js";
+import type { AdbSyncSocketLocked } from "./socket.js";
 import { AdbSyncSocket } from "./socket.js";
 import type { AdbSyncStat, LinuxFileType } from "./stat.js";
 import { adbSyncLstat, adbSyncStat } from "./stat.js";
@@ -31,14 +31,14 @@ export function dirname(path: string): string {
 
 export interface AdbSyncWriteOptions {
     filename: string;
-    file: ReadableStream<Consumable<Uint8Array>>;
+    file: ReadableStream<MaybeConsumable<Uint8Array>>;
     type?: LinuxFileType;
     permission?: number;
     mtime?: number;
     dryRun?: boolean;
 }
 
-export class AdbSync extends AutoDisposable {
+export class AdbSync {
     protected _adb: Adb;
     protected _socket: AdbSyncSocket;
 
@@ -69,21 +69,18 @@ export class AdbSync extends AutoDisposable {
     }
 
     constructor(adb: Adb, socket: AdbSocket) {
-        super();
-
         this._adb = adb;
         this._socket = new AdbSyncSocket(socket, adb.maxPayloadSize);
 
-        this.#supportsStat = adb.supportsFeature(AdbFeature.StatV2);
-        this.#supportsListV2 = adb.supportsFeature(AdbFeature.ListV2);
-        this.#fixedPushMkdir = adb.supportsFeature(AdbFeature.FixedPushMkdir);
-        this.#supportsSendReceiveV2 = adb.supportsFeature(
+        this.#supportsStat = adb.canUseFeature(AdbFeature.StatV2);
+        this.#supportsListV2 = adb.canUseFeature(AdbFeature.ListV2);
+        this.#fixedPushMkdir = adb.canUseFeature(AdbFeature.FixedPushMkdir);
+        this.#supportsSendReceiveV2 = adb.canUseFeature(
             AdbFeature.SendReceiveV2,
         );
         // https://android.googlesource.com/platform/packages/modules/adb/+/91768a57b7138166e0a3d11f79cd55909dda7014/client/file_sync_client.cpp#1361
         this.#needPushMkdirWorkaround =
-            this._adb.supportsFeature(AdbFeature.ShellV2) &&
-            !this.fixedPushMkdir;
+            this._adb.canUseFeature(AdbFeature.ShellV2) && !this.fixedPushMkdir;
     }
 
     /**
@@ -117,7 +114,7 @@ export class AdbSync extends AutoDisposable {
         try {
             await this.lstat(path + "/");
             return true;
-        } catch (e) {
+        } catch {
             return false;
         }
     }
@@ -151,7 +148,7 @@ export class AdbSync extends AutoDisposable {
      */
     async write(options: AdbSyncWriteOptions): Promise<void> {
         if (this.needPushMkdirWorkaround) {
-            // It may fail if the path is already existed.
+            // It may fail if `filename` already exists.
             // Ignore the result.
             // TODO: sync: test push mkdir workaround (need an Android 8 device)
             await this._adb.subprocess.spawnAndWait([
@@ -168,8 +165,11 @@ export class AdbSync extends AutoDisposable {
         });
     }
 
-    override async dispose() {
-        super.dispose();
-        await this._socket.close();
+    lockSocket(): Promise<AdbSyncSocketLocked> {
+        return this._socket.lock();
+    }
+
+    dispose() {
+        return this._socket.close();
     }
 }

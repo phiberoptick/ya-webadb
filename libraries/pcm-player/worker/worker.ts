@@ -40,7 +40,8 @@ abstract class SourceProcessor<T>
                 this.#totalSampleCount -= count;
             }
 
-            const data = event.data as ArrayBuffer[];
+            // https://github.com/microsoft/TypeScript-DOM-lib-generator/issues/1860
+            const { data } = event as MessageEvent<ArrayBuffer[]>;
             const [source, length] = this.createSource(data);
             this.#chunks.push(source);
             this.#chunkSampleCounts.push(length);
@@ -57,7 +58,7 @@ abstract class SourceProcessor<T>
 
     protected abstract createSource(data: ArrayBuffer[]): [T, number];
 
-    process(_inputs: Float32Array[][], [outputs]: Float32Array[][]) {
+    process(_inputs: Float32Array[][], [outputs]: [Float32Array[]]) {
         if (this.#starting) {
             if (this.#totalSampleCount < 0.1 * 48000) {
                 return true;
@@ -71,7 +72,7 @@ abstract class SourceProcessor<T>
             this.#starting = true;
         }
 
-        const outputLength = outputs![0]!.length;
+        const outputLength = outputs[0]!.length;
 
         if (this.#speedUp) {
             for (let i = 0; i < outputLength; i += 1) {
@@ -92,7 +93,7 @@ abstract class SourceProcessor<T>
                     this.#read(inputIndex - this.#readOffset);
                     const weight = WINDOW_WEIGHT_TABLE[inWindowIndex]!;
                     for (let j = 0; j < this.channelCount; j += 1) {
-                        outputs![j]![i] += this.#readBuffer[j]! * weight;
+                        outputs[j]![i]! += this.#readBuffer[j]! * weight;
                     }
                     totalWeight += weight;
 
@@ -102,7 +103,7 @@ abstract class SourceProcessor<T>
 
                 if (totalWeight > 0) {
                     for (let j = 0; j < this.channelCount; j += 1) {
-                        outputs![j]![i] /= totalWeight;
+                        outputs[j]![i]! /= totalWeight;
                     }
                 }
 
@@ -127,7 +128,7 @@ abstract class SourceProcessor<T>
                 this.#inputOffset -= firstChunkSampleCount;
             }
         } else {
-            this.#copyChunks(outputs!);
+            this.#copyChunks(outputs);
         }
 
         return true;

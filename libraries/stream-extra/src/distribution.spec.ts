@@ -1,10 +1,9 @@
-import { describe, expect, it, jest } from "@jest/globals";
+import * as assert from "node:assert";
+import { describe, it, mock } from "node:test";
 
-import {
-    ConsumableReadableStream,
-    ConsumableWritableStream,
-} from "./consumable.js";
+import { Consumable } from "./consumable.js";
 import { DistributionStream } from "./distribution.js";
+import { MaybeConsumable } from "./maybe-consumable.js";
 
 const TestData = new Uint8Array(50);
 for (let i = 0; i < 50; i += 1) {
@@ -16,10 +15,10 @@ async function testInputOutput(
     inputLengths: number[],
     outputLengths: number[],
 ) {
-    const write = jest.fn((chunk: Uint8Array) => {
+    const write = mock.fn((chunk: Uint8Array) => {
         void chunk;
     });
-    await new ConsumableReadableStream<Uint8Array>({
+    await new Consumable.ReadableStream<Uint8Array>({
         async start(controller) {
             let offset = 0;
             for (const length of inputLengths) {
@@ -32,20 +31,19 @@ async function testInputOutput(
     })
         .pipeThrough(new DistributionStream(10, combine || undefined))
         .pipeTo(
-            new ConsumableWritableStream({
+            new MaybeConsumable.WritableStream({
                 write(chunk) {
                     // chunk will be reused, so we need to copy it
                     write(chunk.slice());
                 },
             }),
         );
-
-    expect(write).toHaveBeenCalledTimes(outputLengths.length);
+    assert.strictEqual(write.mock.callCount(), outputLengths.length);
     let offset = 0;
     for (let i = 0; i < outputLengths.length; i += 1) {
         const end = offset + outputLengths[i]!;
-        expect(write).toHaveBeenNthCalledWith(
-            i + 1,
+        assert.deepStrictEqual(
+            write.mock.calls[i]!.arguments[0],
             TestData.subarray(offset, end),
         );
         offset = end;

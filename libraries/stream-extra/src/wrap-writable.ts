@@ -1,9 +1,9 @@
-import type { ValueOrPromise } from "@yume-chan/struct";
+import type { MaybePromiseLike } from "@yume-chan/async";
 
 import type { TransformStream, WritableStreamDefaultWriter } from "./stream.js";
 import { WritableStream } from "./stream.js";
 
-export type WrapWritableStreamStart<T> = () => ValueOrPromise<
+export type WrapWritableStreamStart<T> = () => MaybePromiseLike<
     WritableStream<T>
 >;
 
@@ -13,19 +13,19 @@ export interface WritableStreamWrapper<T> {
 }
 
 async function getWrappedWritableStream<T>(
-    wrapper:
+    start:
         | WritableStream<T>
         | WrapWritableStreamStart<T>
         | WritableStreamWrapper<T>,
 ) {
-    if ("start" in wrapper) {
-        return await wrapper.start();
-    } else if (typeof wrapper === "function") {
-        return await wrapper();
+    if ("start" in start) {
+        return await start.start();
+    } else if (typeof start === "function") {
+        return await start();
     } else {
         // Can't use `wrapper instanceof WritableStream`
         // Because we want to be compatible with any WritableStream-like objects
-        return wrapper;
+        return start;
     }
 }
 
@@ -35,20 +35,17 @@ export class WrapWritableStream<T> extends WritableStream<T> {
     #writer!: WritableStreamDefaultWriter<T>;
 
     constructor(
-        wrapper:
+        start:
             | WritableStream<T>
             | WrapWritableStreamStart<T>
             | WritableStreamWrapper<T>,
     ) {
         super({
             start: async () => {
-                // `start` is invoked before `ReadableStream`'s constructor finish,
-                // so using `this` synchronously causes
-                // "Must call super constructor in derived class before accessing 'this' or returning from derived constructor".
-                // Queue a microtask to avoid this.
-                await Promise.resolve();
-
-                this.writable = await getWrappedWritableStream(wrapper);
+                const writable = await getWrappedWritableStream(start);
+                // `start` is called in `super()`, so can't use `this` synchronously.
+                // but it's fine after the first `await`
+                this.writable = writable;
                 this.#writer = this.writable.getWriter();
             },
             write: async (chunk) => {
@@ -56,8 +53,8 @@ export class WrapWritableStream<T> extends WritableStream<T> {
             },
             abort: async (reason) => {
                 await this.#writer.abort(reason);
-                if ("close" in wrapper) {
-                    await wrapper.close?.();
+                if (start !== this.writable && "close" in start) {
+                    await start.close?.();
                 }
             },
             close: async () => {
@@ -66,8 +63,8 @@ export class WrapWritableStream<T> extends WritableStream<T> {
                 // closing the outer stream first will make the inner stream incapable of
                 // sending data in its `close` handler.
                 await this.#writer.close();
-                if ("close" in wrapper) {
-                    await wrapper.close?.();
+                if (start !== this.writable && "close" in start) {
+                    await start.close?.();
                 }
             },
         });

@@ -1,18 +1,17 @@
 import { PromiseResolver } from "@yume-chan/async";
 import type {
-    Consumable,
     PushReadableStreamController,
     ReadableStream,
     WritableStreamDefaultWriter,
 } from "@yume-chan/stream-extra";
 import {
-    ConsumableWritableStream,
+    MaybeConsumable,
     PushReadableStream,
     StructDeserializeStream,
     WritableStream,
 } from "@yume-chan/stream-extra";
-import type { StructValueType } from "@yume-chan/struct";
-import Struct, { placeholder } from "@yume-chan/struct";
+import type { StructValue } from "@yume-chan/struct";
+import { buffer, struct, u32, u8 } from "@yume-chan/struct";
 
 import type { Adb, AdbSocket } from "../../../adb.js";
 import { AdbFeature } from "../../../features.js";
@@ -20,22 +19,28 @@ import { encodeUtf8 } from "../../../utils/index.js";
 
 import type { AdbSubprocessProtocol } from "./types.js";
 
-export enum AdbShellProtocolId {
-    Stdin,
-    Stdout,
-    Stderr,
-    Exit,
-    CloseStdin,
-    WindowSizeChange,
-}
+export const AdbShellProtocolId = {
+    Stdin: 0,
+    Stdout: 1,
+    Stderr: 2,
+    Exit: 3,
+    CloseStdin: 4,
+    WindowSizeChange: 5,
+} as const;
 
-// This packet format is used in both direction.
-const AdbShellProtocolPacket = new Struct({ littleEndian: true })
-    .uint8("id", placeholder<AdbShellProtocolId>())
-    .uint32("length")
-    .uint8Array("data", { lengthField: "length" });
+export type AdbShellProtocolId =
+    (typeof AdbShellProtocolId)[keyof typeof AdbShellProtocolId];
 
-type AdbShellProtocolPacket = StructValueType<typeof AdbShellProtocolPacket>;
+// This packet format is used in both directions.
+export const AdbShellProtocolPacket = struct(
+    {
+        id: u8<AdbShellProtocolId>(),
+        data: buffer(u32),
+    },
+    { littleEndian: true },
+);
+
+type AdbShellProtocolPacket = StructValue<typeof AdbShellProtocolPacket>;
 
 /**
  * Shell v2 a.k.a Shell Protocol
@@ -47,7 +52,7 @@ type AdbShellProtocolPacket = StructValueType<typeof AdbShellProtocolPacket>;
  */
 export class AdbSubprocessShellProtocol implements AdbSubprocessProtocol {
     static isSupported(adb: Adb) {
-        return adb.supportsFeature(AdbFeature.ShellV2);
+        return adb.canUseFeature(AdbFeature.ShellV2);
     }
 
     static async pty(adb: Adb, command: string) {
@@ -64,9 +69,9 @@ export class AdbSubprocessShellProtocol implements AdbSubprocessProtocol {
     }
 
     readonly #socket: AdbSocket;
-    #writer: WritableStreamDefaultWriter<Consumable<Uint8Array>>;
+    #writer: WritableStreamDefaultWriter<MaybeConsumable<Uint8Array>>;
 
-    #stdin: WritableStream<Consumable<Uint8Array>>;
+    #stdin: WritableStream<MaybeConsumable<Uint8Array>>;
     get stdin() {
         return this.#stdin;
     }
@@ -108,14 +113,10 @@ export class AdbSubprocessShellProtocol implements AdbSubprocessProtocol {
                                 this.#exit.resolve(chunk.data[0]!);
                                 break;
                             case AdbShellProtocolId.Stdout:
-                                if (!stdoutController.abortSignal.aborted) {
-                                    await stdoutController.enqueue(chunk.data);
-                                }
+                                await stdoutController.enqueue(chunk.data);
                                 break;
                             case AdbShellProtocolId.Stderr:
-                                if (!stderrController.abortSignal.aborted) {
-                                    await stderrController.enqueue(chunk.data);
-                                }
+                                await stderrController.enqueue(chunk.data);
                                 break;
                         }
                     },
@@ -140,23 +141,20 @@ export class AdbSubprocessShellProtocol implements AdbSubprocessProtocol {
 
         this.#writer = this.#socket.writable.getWriter();
 
-        this.#stdin = new WritableStream<Consumable<Uint8Array>>({
+        this.#stdin = new MaybeConsumable.WritableStream<Uint8Array>({
             write: async (chunk) => {
-                await ConsumableWritableStream.write(
-                    this.#writer,
+                await this.#writer.write(
                     AdbShellProtocolPacket.serialize({
                         id: AdbShellProtocolId.Stdin,
-                        data: chunk.value,
+                        data: chunk,
                     }),
                 );
-                chunk.consume();
             },
         });
     }
 
     async resize(rows: number, cols: number) {
-        await ConsumableWritableStream.write(
-            this.#writer,
+        await this.#writer.write(
             AdbShellProtocolPacket.serialize({
                 id: AdbShellProtocolId.WindowSizeChange,
                 // The "correct" format is `${rows}x${cols},${x_pixels}x${y_pixels}`

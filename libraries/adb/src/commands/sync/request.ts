@@ -1,27 +1,24 @@
-import Struct from "@yume-chan/struct";
+import { encodeUtf8, struct, u32 } from "@yume-chan/struct";
 
-import { encodeUtf8 } from "../../utils/index.js";
+import { adbSyncEncodeId } from "./response.js";
 
-export enum AdbSyncRequestId {
-    List = "LIST",
-    ListV2 = "LIS2",
-    Send = "SEND",
-    SendV2 = "SND2",
-    Lstat = "STAT",
-    Stat = "STA2",
-    LstatV2 = "LST2",
-    Data = "DATA",
-    Done = "DONE",
-    Receive = "RECV",
-}
+export const AdbSyncRequestId = {
+    List: adbSyncEncodeId("LIST"),
+    ListV2: adbSyncEncodeId("LIS2"),
+    Send: adbSyncEncodeId("SEND"),
+    SendV2: adbSyncEncodeId("SND2"),
+    Lstat: adbSyncEncodeId("STAT"),
+    Stat: adbSyncEncodeId("STA2"),
+    LstatV2: adbSyncEncodeId("LST2"),
+    Data: adbSyncEncodeId("DATA"),
+    Done: adbSyncEncodeId("DONE"),
+    Receive: adbSyncEncodeId("RECV"),
+} as const;
 
-export const AdbSyncNumberRequest = new Struct({ littleEndian: true })
-    .string("id", { length: 4 })
-    .uint32("arg");
-
-export const AdbSyncDataRequest = new Struct({ littleEndian: true })
-    .concat(AdbSyncNumberRequest)
-    .uint8Array("data", { lengthField: "arg" });
+export const AdbSyncNumberRequest = struct(
+    { id: u32, arg: u32 },
+    { littleEndian: true },
+);
 
 export interface AdbSyncWritable {
     write(buffer: Uint8Array): Promise<void>;
@@ -29,26 +26,28 @@ export interface AdbSyncWritable {
 
 export async function adbSyncWriteRequest(
     writable: AdbSyncWritable,
-    id: AdbSyncRequestId | string,
+    id: number | string,
     value: number | string | Uint8Array,
 ): Promise<void> {
-    if (typeof value === "number") {
-        const buffer = AdbSyncNumberRequest.serialize({
-            id,
-            arg: value,
-        });
-        await writable.write(buffer);
-    } else if (typeof value === "string") {
-        // Let `writable` buffer writes
-        const buffer = encodeUtf8(value);
-        await writable.write(
-            AdbSyncNumberRequest.serialize({ id, arg: buffer.byteLength }),
-        );
-        await writable.write(buffer);
-    } else {
-        await writable.write(
-            AdbSyncNumberRequest.serialize({ id, arg: value.byteLength }),
-        );
-        await writable.write(value);
+    if (typeof id === "string") {
+        id = adbSyncEncodeId(id);
     }
+
+    if (typeof value === "number") {
+        await writable.write(
+            AdbSyncNumberRequest.serialize({ id, arg: value }),
+        );
+        return;
+    }
+
+    if (typeof value === "string") {
+        value = encodeUtf8(value);
+    }
+
+    // `writable` is buffered, it copies inputs to an internal buffer,
+    // so don't concatenate headers and data here, that will be an unnecessary copy.
+    await writable.write(
+        AdbSyncNumberRequest.serialize({ id, arg: value.length }),
+    );
+    await writable.write(value);
 }

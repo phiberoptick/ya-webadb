@@ -1,9 +1,11 @@
-import Struct from "@yume-chan/struct";
+import type { StructInit } from "@yume-chan/struct";
+import { string, struct, u32, u8 } from "@yume-chan/struct";
 
-export const ScrcpyInjectTextControlMessage = new Struct()
-    .uint8("type")
-    .uint32("length")
-    .string("text", { lengthField: "length" });
+export const ScrcpyInjectTextControlMessage = struct(
+    { type: u8, text: string(u32) },
+    { littleEndian: false },
+);
 
-export type ScrcpyInjectTextControlMessage =
-    (typeof ScrcpyInjectTextControlMessage)["TInit"];
+export type ScrcpyInjectTextControlMessage = StructInit<
+    typeof ScrcpyInjectTextControlMessage
+>;
