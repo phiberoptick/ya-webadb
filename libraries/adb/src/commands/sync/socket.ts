@@ -1,11 +1,11 @@
 import type {
-    Consumable,
+    MaybeConsumable,
     WritableStreamDefaultWriter,
 } from "@yume-chan/stream-extra";
 import {
     BufferCombiner,
     BufferedReadableStream,
-    ConsumableWritableStream,
+    Consumable,
 } from "@yume-chan/stream-extra";
 import type { AsyncExactReadable } from "@yume-chan/struct";
 
@@ -13,7 +13,7 @@ import type { AdbSocket } from "../../adb.js";
 import { AutoResetEvent } from "../../utils/index.js";
 
 export class AdbSyncSocketLocked implements AsyncExactReadable {
-    readonly #writer: WritableStreamDefaultWriter<Consumable<Uint8Array>>;
+    readonly #writer: WritableStreamDefaultWriter<MaybeConsumable<Uint8Array>>;
     readonly #readable: BufferedReadableStream;
     readonly #socketLock: AutoResetEvent;
     readonly #writeLock = new AutoResetEvent();
@@ -24,7 +24,7 @@ export class AdbSyncSocketLocked implements AsyncExactReadable {
     }
 
     constructor(
-        writer: WritableStreamDefaultWriter<Consumable<Uint8Array>>,
+        writer: WritableStreamDefaultWriter<MaybeConsumable<Uint8Array>>,
         readable: BufferedReadableStream,
         bufferSize: number,
         lock: AutoResetEvent,
@@ -35,8 +35,9 @@ export class AdbSyncSocketLocked implements AsyncExactReadable {
         this.#combiner = new BufferCombiner(bufferSize);
     }
 
-    async #writeInnerStream(buffer: Uint8Array) {
-        await ConsumableWritableStream.write(this.#writer, buffer);
+    #write(buffer: Uint8Array) {
+        // `#combiner` will reuse the buffer, so we need to use the Consumable pattern
+        return Consumable.WritableStream.write(this.#writer, buffer);
     }
 
     async flush() {
@@ -44,7 +45,7 @@ export class AdbSyncSocketLocked implements AsyncExactReadable {
             await this.#writeLock.wait();
             const buffer = this.#combiner.flush();
             if (buffer) {
-                await this.#writeInnerStream(buffer);
+                await this.#write(buffer);
             }
         } finally {
             this.#writeLock.notifyOne();
@@ -55,7 +56,7 @@ export class AdbSyncSocketLocked implements AsyncExactReadable {
         try {
             await this.#writeLock.wait();
             for (const buffer of this.#combiner.push(data)) {
-                await this.#writeInnerStream(buffer);
+                await this.#write(buffer);
             }
         } finally {
             this.#writeLock.notifyOne();
@@ -63,11 +64,15 @@ export class AdbSyncSocketLocked implements AsyncExactReadable {
     }
 
     async readExactly(length: number) {
+        // The request may still be in the internal buffer.
+        // Call `flush` to send it before starting reading
         await this.flush();
         return await this.#readable.readExactly(length);
     }
 
     release(): void {
+        // In theory, the writer shouldn't leave anything in the buffer,
+        // but to be safe, call `flush` to throw away any remaining data.
         this.#combiner.flush();
         this.#socketLock.notifyOne();
     }

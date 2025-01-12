@@ -1,11 +1,15 @@
 // cspell: ignore killforward
 
-import { AutoDisposable } from "@yume-chan/event";
 import { BufferedReadableStream } from "@yume-chan/stream-extra";
-import Struct, { ExactReadableEndedError } from "@yume-chan/struct";
+import {
+    encodeUtf8,
+    ExactReadableEndedError,
+    string,
+    struct,
+} from "@yume-chan/struct";
 
 import type { Adb, AdbIncomingSocketHandler } from "../adb.js";
-import { decodeUtf8, hexToNumber } from "../utils/index.js";
+import { hexToNumber, sequenceEqual } from "../utils/index.js";
 
 export interface AdbForwardListener {
     deviceSerial: string;
@@ -15,14 +19,25 @@ export interface AdbForwardListener {
     remoteName: string;
 }
 
-const AdbReverseStringResponse = new Struct()
-    .string("length", { length: 4 })
-    .string("content", { lengthField: "length", lengthFieldRadix: 16 });
+const AdbReverseStringResponse = struct(
+    {
+        length: string(4),
+        content: string({
+            field: "length",
+            convert(value: string) {
+                return Number.parseInt(value, 16);
+            },
+            back(value) {
+                return value.toString(16).padStart(4, "0");
+            },
+        }),
+    },
+    { littleEndian: true },
+);
 
 export class AdbReverseError extends Error {
     constructor(message: string) {
         super(message);
-        Object.setPrototypeOf(this, new.target.prototype);
     }
 }
 
@@ -34,32 +49,44 @@ export class AdbReverseNotSupportedError extends AdbReverseError {
     }
 }
 
-const AdbReverseErrorResponse = new Struct()
-    .concat(AdbReverseStringResponse)
-    .postDeserialize((value) => {
-        // https://issuetracker.google.com/issues/37066218
-        // ADB on Android <9 can't create reverse tunnels when connected wirelessly (ADB over Wi-Fi),
-        // and returns this confusing "more than one device/emulator" error.
-        if (value.content === "more than one device/emulator") {
-            throw new AdbReverseNotSupportedError();
-        } else {
-            throw new AdbReverseError(value.content);
-        }
-    });
+const AdbReverseErrorResponse = struct(
+    /* #__PURE__ */ (() => AdbReverseStringResponse.fields)(),
+    {
+        littleEndian: true,
+        postDeserialize: (value) => {
+            // https://issuetracker.google.com/issues/37066218
+            // ADB on Android <9 can't create reverse tunnels when connected wirelessly (ADB over Wi-Fi),
+            // and returns this confusing "more than one device/emulator" error.
+            if (value.content === "more than one device/emulator") {
+                throw new AdbReverseNotSupportedError();
+            } else {
+                throw new AdbReverseError(value.content);
+            }
+        },
+    },
+);
 
-async function readString(stream: BufferedReadableStream, length: number) {
-    const buffer = await stream.readExactly(length);
-    return decodeUtf8(buffer);
+// Like `hexToNumber`, it's much faster than first converting `buffer` to a string
+function decimalToNumber(buffer: Uint8Array) {
+    let value = 0;
+    for (const byte of buffer) {
+        // Like `parseInt`, return when it encounters a non-digit character
+        if (byte < 48 || byte > 57) {
+            return value;
+        }
+        value = value * 10 + byte - 48;
+    }
+    return value;
 }
 
-export class AdbReverseCommand extends AutoDisposable {
+const OKAY = encodeUtf8("OKAY");
+
+export class AdbReverseCommand {
     protected adb: Adb;
 
     readonly #deviceAddressToLocalAddress = new Map<string, string>();
 
     constructor(adb: Adb) {
-        super();
-
         this.adb = adb;
     }
 
@@ -70,34 +97,37 @@ export class AdbReverseCommand extends AutoDisposable {
 
     protected async sendRequest(service: string) {
         const stream = await this.createBufferedStream(service);
-        const success = (await readString(stream, 4)) === "OKAY";
-        if (!success) {
+
+        const response = await stream.readExactly(4);
+        if (!sequenceEqual(response, OKAY)) {
             await AdbReverseErrorResponse.deserialize(stream);
         }
+
         return stream;
     }
 
+    /**
+     * Get a list of all reverse port forwarding on the device.
+     */
     async list(): Promise<AdbForwardListener[]> {
         const stream = await this.createBufferedStream("reverse:list-forward");
 
         const response = await AdbReverseStringResponse.deserialize(stream);
-        return response.content.split("\n").map((line) => {
-            const [deviceSerial, localName, remoteName] = line.split(" ") as [
-                string,
-                string,
-                string,
-            ];
-            return { deviceSerial, localName, remoteName };
-        });
+        return response.content
+            .split("\n")
+            .filter((line) => !!line)
+            .map((line) => {
+                const [deviceSerial, localName, remoteName] = line.split(
+                    " ",
+                ) as [string, string, string];
+                return { deviceSerial, localName, remoteName };
+            });
 
         // No need to close the stream, device will close it
     }
 
     /**
-     * Add an already existing reverse tunnel. Depends on the transport type, this may not do anything.
-     * @param deviceAddress The address to be listened on device by ADB daemon. Or `tcp:0` to choose an available TCP port.
-     * @param localAddress The address that listens on the local machine.
-     * @returns `tcp:{ACTUAL_LISTENING_PORT}`, If `deviceAddress` is `tcp:0`; otherwise, `deviceAddress`.
+     * Add a reverse port forwarding for a program that already listens on a port.
      */
     async addExternal(deviceAddress: string, localAddress: string) {
         const stream = await this.sendRequest(
@@ -110,8 +140,8 @@ export class AdbReverseCommand extends AutoDisposable {
             const position = stream.position;
             try {
                 const length = hexToNumber(await stream.readExactly(4));
-                const port = await readString(stream, length);
-                deviceAddress = `tcp:${Number.parseInt(port, 10)}`;
+                const port = decimalToNumber(await stream.readExactly(length));
+                deviceAddress = `tcp:${port}`;
             } catch (e) {
                 if (
                     e instanceof ExactReadableEndedError &&
@@ -130,12 +160,7 @@ export class AdbReverseCommand extends AutoDisposable {
     }
 
     /**
-     * @param deviceAddress The address to be listened on device by ADB daemon. Or `tcp:0` to choose an available TCP port.
-     * @param handler A callback to handle incoming connections.
-     * @param localAddressThe The address that listens on the local machine. May be `undefined` to let the transport choose an appropriate one.
-     * @returns `tcp:{ACTUAL_LISTENING_PORT}`, If `deviceAddress` is `tcp:0`; otherwise, `deviceAddress`.
-     * @throws {AdbReverseNotSupportedError} If ADB reverse tunnel is not supported on this device when connected wirelessly.
-     * @throws {AdbReverseError} If ADB daemon returns an error.
+     * Add a reverse port forwarding.
      */
     async add(
         deviceAddress: string,
@@ -157,6 +182,9 @@ export class AdbReverseCommand extends AutoDisposable {
         }
     }
 
+    /**
+     * Remove a reverse port forwarding.
+     */
     async remove(deviceAddress: string): Promise<void> {
         const localAddress =
             this.#deviceAddressToLocalAddress.get(deviceAddress);
@@ -169,6 +197,9 @@ export class AdbReverseCommand extends AutoDisposable {
         // No need to close the stream, device will close it
     }
 
+    /**
+     * Remove all reverse port forwarding, including the ones added by other programs.
+     */
     async removeAll(): Promise<void> {
         await this.adb.transport.clearReverseTunnels();
         this.#deviceAddressToLocalAddress.clear();

@@ -1,6 +1,62 @@
 import { AdbCommandBase } from "@yume-chan/adb";
 
+const BatteryDumpFields: Record<
+    string,
+    {
+        type: "number" | "boolean" | "string";
+        field: keyof DumpSys.Battery.Info;
+    }
+> = {
+    "AC powered": { type: "boolean", field: "acPowered" },
+    "USB powered": { type: "boolean", field: "usbPowered" },
+    "Wireless powered": { type: "boolean", field: "wirelessPowered" },
+    "Dock powered": { type: "boolean", field: "dockPowered" },
+    "Max charging current": {
+        type: "number",
+        field: "maxChargingCurrent",
+    },
+    "Max charging voltage": {
+        type: "number",
+        field: "maxChargingVoltage",
+    },
+    "Charge counter": { type: "number", field: "chargeCounter" },
+    status: { type: "number", field: "status" },
+    health: { type: "number", field: "health" },
+    present: { type: "boolean", field: "present" },
+    level: { type: "number", field: "level" },
+    scale: { type: "number", field: "scale" },
+    voltage: { type: "number", field: "voltage" },
+    temperature: { type: "number", field: "temperature" },
+    technology: { type: "string", field: "technology" },
+    current: { type: "number", field: "current" },
+};
+
+const Status = {
+    Unknown: 1,
+    Charging: 2,
+    Discharging: 3,
+    NotCharging: 4,
+    Full: 5,
+} as const;
+
+const Health = {
+    Unknown: 1,
+    Good: 2,
+    Overheat: 3,
+    Dead: 4,
+    OverVoltage: 5,
+    UnspecifiedFailure: 6,
+    Cold: 7,
+} as const;
+
+const Battery = {
+    Status,
+    Health,
+};
+
 export class DumpSys extends AdbCommandBase {
+    static readonly Battery = Battery;
+
     async diskStats() {
         const output = await this.adb.subprocess.spawnAndWaitLegacy([
             "dumpsys",
@@ -34,96 +90,74 @@ export class DumpSys extends AdbCommandBase {
         };
     }
 
-    async battery() {
+    async battery(): Promise<DumpSys.Battery.Info> {
         const output = await this.adb.subprocess.spawnAndWaitLegacy([
             "dumpsys",
             "battery",
         ]);
 
-        let acPowered = false;
-        let usbPowered = false;
-        let wirelessPowered = false;
-        let level: number | undefined;
-        let scale: number | undefined;
-        let voltage: number | undefined;
-        let current: number | undefined;
-        let status: DumpSys.Battery.Status | undefined;
-        let health: DumpSys.Battery.Health | undefined;
+        const info: DumpSys.Battery.Info = {
+            acPowered: false,
+            usbPowered: false,
+            wirelessPowered: false,
+            dockPowered: false,
+            status: DumpSys.Battery.Status.Unknown,
+            health: DumpSys.Battery.Health.Unknown,
+        };
+
         for (const line of output.split("\n")) {
-            const parts = line.split(":");
+            const parts = line.split(":").map((part) => part.trim());
             if (parts.length !== 2) {
                 continue;
             }
 
-            switch (parts[0]!.trim()) {
-                case "AC powered":
-                    acPowered = parts[1]!.trim() === "true";
+            const field = BatteryDumpFields[parts[0]!];
+            if (!field) {
+                continue;
+            }
+
+            switch (field.type) {
+                case "boolean":
+                    info[field.field] = (parts[1]!.trim() === "true") as never;
                     break;
-                case "USB powered":
-                    usbPowered = parts[1]!.trim() === "true";
-                    break;
-                case "Wireless powered":
-                    wirelessPowered = parts[1]!.trim() === "true";
-                    break;
-                case "level":
-                    level = Number.parseInt(parts[1]!.trim(), 10);
-                    break;
-                case "scale":
-                    scale = Number.parseInt(parts[1]!.trim(), 10);
-                    break;
-                case "voltage":
-                    voltage = Number.parseInt(parts[1]!.trim(), 10);
-                    break;
-                case "current now":
-                    current = Number.parseInt(parts[1]!.trim(), 10);
-                    break;
-                case "status":
-                    status = Number.parseInt(
+                case "number":
+                    info[field.field] = Number.parseInt(
                         parts[1]!.trim(),
                         10,
-                    ) as DumpSys.Battery.Status;
+                    ) as never;
                     break;
-                case "health":
-                    health = Number.parseInt(
-                        parts[1]!.trim(),
-                        10,
-                    ) as DumpSys.Battery.Health;
+                case "string":
+                    info[field.field] = parts[1]! as never;
                     break;
             }
         }
 
-        return {
-            acPowered,
-            usbPowered,
-            wirelessPowered,
-            level,
-            scale,
-            voltage,
-            current,
-            status,
-            health,
-        };
+        return info;
     }
 }
 
 export namespace DumpSys {
     export namespace Battery {
-        export enum Status {
-            Unknown = 1,
-            Charging,
-            Discharging,
-            NotCharging,
-            Full,
-        }
+        export type Status = (typeof Status)[keyof typeof Status];
+        export type Health = (typeof Health)[keyof typeof Health];
 
-        export enum Health {
-            Unknown = 1,
-            Good,
-            Overheat,
-            Dead,
-            OverVoltage,
-            UnspecifiedFailure,
-            Cold,
+        export interface Info {
+            acPowered: boolean;
+            usbPowered: boolean;
+            wirelessPowered: boolean;
+            dockPowered: boolean;
+            maxChargingCurrent?: number;
+            maxChargingVoltage?: number;
+            chargeCounter?: number;
+            status: Status;
+            health: Health;
+            present?: boolean;
+            level?: number;
+            scale?: number;
+            voltage?: number;
+            temperature?: number;
+            technology?: string;
+            current?: number;
         }
     }
 }

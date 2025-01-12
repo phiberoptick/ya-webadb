@@ -1,4 +1,4 @@
-import type { ValueOrPromise } from "@yume-chan/struct";
+import type { MaybePromiseLike } from "@yume-chan/async";
 
 import type {
     QueuingStrategy,
@@ -9,12 +9,13 @@ import { ReadableStream } from "./stream.js";
 
 export type WrapReadableStreamStart<T> = (
     controller: ReadableStreamDefaultController<T>,
-) => ValueOrPromise<ReadableStream<T>>;
+) => MaybePromiseLike<ReadableStream<T>>;
 
 export interface ReadableStreamWrapper<T> {
     start: WrapReadableStreamStart<T>;
-    cancel?(reason?: unknown): ValueOrPromise<void>;
-    close?(): ValueOrPromise<void>;
+    cancel?: (reason?: unknown) => MaybePromiseLike<void>;
+    close?: () => MaybePromiseLike<void>;
+    error?: (reason?: unknown) => MaybePromiseLike<void>;
 }
 
 function getWrappedReadableStream<T>(
@@ -57,27 +58,32 @@ export class WrapReadableStream<T> extends ReadableStream<T> {
         super(
             {
                 start: async (controller) => {
-                    // `start` is invoked before `ReadableStream`'s constructor finish,
-                    // so using `this` synchronously causes
-                    // "Must call super constructor in derived class before accessing 'this' or returning from derived constructor".
-                    // Queue a microtask to avoid this.
-                    await Promise.resolve();
-
-                    this.readable = await getWrappedReadableStream(
+                    const readable = await getWrappedReadableStream(
                         wrapper,
                         controller,
                     );
+                    // `start` is called in `super()`, so can't use `this` synchronously.
+                    // but it's fine after the first `await`
+                    this.readable = readable;
                     this.#reader = this.readable.getReader();
                 },
                 pull: async (controller) => {
-                    const result = await this.#reader.read();
-                    if (result.done) {
+                    const { done, value } = await this.#reader
+                        .read()
+                        .catch((e) => {
+                            if ("error" in wrapper) {
+                                wrapper.error(e);
+                            }
+                            throw e;
+                        });
+
+                    if (done) {
                         controller.close();
                         if ("close" in wrapper) {
                             await wrapper.close?.();
                         }
                     } else {
-                        controller.enqueue(result.value);
+                        controller.enqueue(value);
                     }
                 },
                 cancel: async (reason) => {

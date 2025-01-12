@@ -1,6 +1,6 @@
 {
     "name": "@yume-chan/scrcpy-decoder-webcodecs",
-    "version": "0.0.22",
+    "version": "1.1.0",
     "description": "Raw H.264 stream decoder and renderer using WebCodecs API (requires modern browser).",
     "keywords": [
         "adb",
@@ -26,29 +26,24 @@
     "type": "module",
     "main": "esm/index.js",
     "types": "esm/index.d.ts",
+    "sideEffects": false,
     "scripts": {
         "build": "tsc -b tsconfig.build.json",
-        "build:watch": "tsc -b tsconfig.build.json",
-        "//test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --coverage",
-        "lint": "eslint src/**/*.ts --fix && prettier src/**/*.ts --write --tab-width 4",
+        "lint": "run-eslint && prettier src/**/*.ts --write --tab-width 4",
         "prepublishOnly": "npm run build"
     },
     "dependencies": {
-        "@yume-chan/event": "workspace:^0.0.22",
-        "@yume-chan/scrcpy": "workspace:^0.0.22",
-        "@yume-chan/scrcpy-decoder-tinyh264": "workspace:^0.0.22",
-        "@yume-chan/stream-extra": "workspace:^0.0.22",
-        "tslib": "^2.6.2"
+        "@yume-chan/async": "^4.0.2",
+        "@yume-chan/event": "workspace:^",
+        "@yume-chan/no-data-view": "workspace:^",
+        "@yume-chan/scrcpy": "workspace:^",
+        "@yume-chan/scrcpy-decoder-tinyh264": "workspace:^",
+        "@yume-chan/stream-extra": "workspace:^"
     },
     "devDependencies": {
-        "@jest/globals": "^30.0.0-alpha.2",
-        "@yume-chan/eslint-config": "workspace:^1.0.0",
-        "@yume-chan/tsconfig": "workspace:^1.0.0",
-        "cross-env": "^7.0.3",
-        "eslint": "^8.56.0",
-        "jest": "^30.0.0-alpha.2",
-        "prettier": "^3.2.4",
-        "ts-jest": "^29.1.1",
-        "typescript": "^5.3.3"
+        "@yume-chan/eslint-config": "workspace:^",
+        "@yume-chan/tsconfig": "workspace:^",
+        "prettier": "^3.4.2",
+        "typescript": "^5.7.3"
     }
 }

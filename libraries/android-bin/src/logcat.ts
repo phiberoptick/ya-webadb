@@ -5,42 +5,50 @@ import { AdbCommandBase, AdbSubprocessNoneProtocol } from "@yume-chan/adb";
 import type { ReadableStream } from "@yume-chan/stream-extra";
 import {
     BufferedTransformStream,
-    DecodeUtf8Stream,
     SplitStringStream,
+    TextDecoderStream,
     WrapReadableStream,
-    WritableStream,
 } from "@yume-chan/stream-extra";
-import type { AsyncExactReadable } from "@yume-chan/struct";
-import Struct, { decodeUtf8 } from "@yume-chan/struct";
+import type { AsyncExactReadable, StructValue } from "@yume-chan/struct";
+import { decodeUtf8, struct, u16, u32 } from "@yume-chan/struct";
 
 // `adb logcat` is an alias to `adb shell logcat`
 // so instead of adding to core library, it's implemented here
 
 // https://cs.android.com/android/platform/superproject/+/master:system/logging/liblog/include/android/log.h;l=141;drc=82b5738732161dbaafb2e2f25cce19cd26b9157d
-export enum LogId {
-    All = -1,
-    Main,
-    Radio,
-    Events,
-    System,
-    Crash,
-    Stats,
-    Security,
-    Kernel,
-}
+export const LogId = {
+    All: -1,
+    Main: 0,
+    Radio: 1,
+    Events: 2,
+    System: 3,
+    Crash: 4,
+    Stats: 5,
+    Security: 6,
+    Kernel: 7,
+} as const;
+
+export type LogId = (typeof LogId)[keyof typeof LogId];
+
+const LogIdName =
+    /* #__PURE__ */
+    (() => Object.fromEntries(Object.entries(LogId).map(([k, v]) => [v, k])))();
 
 // https://cs.android.com/android/platform/superproject/+/master:system/logging/liblog/include/android/log.h;l=73;drc=82b5738732161dbaafb2e2f25cce19cd26b9157d
-export enum AndroidLogPriority {
-    Unknown,
-    Default,
-    Verbose,
-    Debug,
-    Info,
-    Warn,
-    Error,
-    Fatal,
-    Silent,
-}
+export const AndroidLogPriority = {
+    Unknown: 0,
+    Default: 1,
+    Verbose: 2,
+    Debug: 3,
+    Info: 4,
+    Warn: 5,
+    Error: 6,
+    Fatal: 7,
+    Silent: 8,
+} as const;
+
+export type AndroidLogPriority =
+    (typeof AndroidLogPriority)[keyof typeof AndroidLogPriority];
 
 // https://cs.android.com/android/platform/superproject/+/master:system/logging/liblog/logprint.cpp;l=140;drc=8dbf3b2bb6b6d1652d9797e477b9abd03278bb79
 export const AndroidLogPriorityToCharacter: Record<AndroidLogPriority, string> =
@@ -56,16 +64,18 @@ export const AndroidLogPriorityToCharacter: Record<AndroidLogPriority, string> =
         [AndroidLogPriority.Silent]: "S",
     };
 
-export enum LogcatFormat {
-    Brief,
-    Process,
-    Tag,
-    Thread,
-    Raw,
-    Time,
-    ThreadTime,
-    Long,
-}
+export const LogcatFormat = {
+    Brief: 0,
+    Process: 1,
+    Tag: 2,
+    Thread: 3,
+    Raw: 4,
+    Time: 5,
+    ThreadTime: 6,
+    Long: 7,
+} as const;
+
+export type LogcatFormat = (typeof LogcatFormat)[keyof typeof LogcatFormat];
 
 export interface LogcatFormatModifiers {
     microseconds?: boolean;
@@ -85,28 +95,34 @@ export interface LogcatOptions {
     ids?: LogId[];
 }
 
-const NANOSECONDS_PER_SECOND = BigInt(1e9);
+const NANOSECONDS_PER_SECOND = /* #__PURE__ */ BigInt(1e9);
 
 // https://cs.android.com/android/platform/superproject/+/master:system/logging/liblog/include/log/log_read.h;l=39;drc=82b5738732161dbaafb2e2f25cce19cd26b9157d
-export const LoggerEntry = new Struct({ littleEndian: true })
-    .uint16("payloadSize")
-    .uint16("headerSize")
-    .int32("pid")
-    .uint32("tid")
-    .uint32("seconds")
-    .uint32("nanoseconds")
-    .uint32("logId")
-    .uint32("uid")
-    .extra({
-        get timestamp() {
-            return (
-                BigInt(this.seconds) * NANOSECONDS_PER_SECOND +
-                BigInt(this.nanoseconds)
-            );
+export const LoggerEntry = struct(
+    {
+        payloadSize: u16,
+        headerSize: u16,
+        pid: u32,
+        tid: u32,
+        seconds: u32,
+        nanoseconds: u32,
+        logId: u32,
+        uid: u32,
+    },
+    {
+        littleEndian: true,
+        extra: {
+            get timestamp(): bigint {
+                return (
+                    BigInt(this.seconds) * NANOSECONDS_PER_SECOND +
+                    BigInt(this.nanoseconds)
+                );
+            },
         },
-    });
+    },
+);
 
-export type LoggerEntry = (typeof LoggerEntry)["TDeserializeResult"];
+export type LoggerEntry = StructValue<typeof LoggerEntry>;
 
 // https://cs.android.com/android/platform/superproject/+/master:system/logging/liblog/logprint.cpp;drc=bbe77d66e7bee8bd1f0bc7e5492b5376b0207ef6;bpv=0
 export interface AndroidLogEntry extends LoggerEntry {
@@ -353,6 +369,7 @@ export async function deserializeAndroidLogEntry(
 ): Promise<AndroidLogEntry> {
     const entry = (await LoggerEntry.deserialize(stream)) as AndroidLogEntry;
     if (entry.headerSize !== LoggerEntry.size) {
+        // Skip unknown fields
         await stream.readExactly(entry.headerSize - LoggerEntry.size);
     }
 
@@ -384,7 +401,7 @@ export interface LogSize {
 
 export class Logcat extends AdbCommandBase {
     static logIdToName(id: LogId): string {
-        return LogId[id];
+        return LogIdName[id]!;
     }
 
     static logNameToId(name: string): LogId {
@@ -403,12 +420,12 @@ export class Logcat extends AdbCommandBase {
 
     // TODO: logcat: Support output format before Android 10
     // ref https://android-review.googlesource.com/c/platform/system/core/+/748128
-    static readonly LOG_SIZE_REGEX_10 =
+    static readonly LOG_SIZE_REGEX_10: RegExp =
         /(.*): ring buffer is (.*) (.*)B \((.*) (.*)B consumed\), max entry is (.*) B, max payload is (.*) B/;
 
     // Android 11 added `readable` part
     // ref https://android-review.googlesource.com/c/platform/system/core/+/1390940
-    static readonly LOG_SIZE_REGEX_11 =
+    static readonly LOG_SIZE_REGEX_11: RegExp =
         /(.*): ring buffer is (.*) (.*)B \((.*) (.*)B consumed, (.*) (.*)B readable\), max entry is (.*) B, max payload is (.*) B/;
 
     async getLogSize(ids?: LogId[]): Promise<LogSize[]> {
@@ -419,58 +436,53 @@ export class Logcat extends AdbCommandBase {
         ]);
 
         const result: LogSize[] = [];
-        await stdout
-            .pipeThrough(new DecodeUtf8Stream())
-            .pipeThrough(new SplitStringStream("\n"))
-            .pipeTo(
-                new WritableStream({
-                    write(chunk) {
-                        let match = chunk.match(Logcat.LOG_SIZE_REGEX_11);
-                        if (match) {
-                            result.push({
-                                id: Logcat.logNameToId(match[1]!),
-                                size: Logcat.parseSize(
-                                    Number.parseInt(match[2]!, 10),
-                                    match[3]!,
-                                ),
-                                readable: Logcat.parseSize(
-                                    Number.parseInt(match[6]!, 10),
-                                    match[7]!,
-                                ),
-                                consumed: Logcat.parseSize(
-                                    Number.parseInt(match[4]!, 10),
-                                    match[5]!,
-                                ),
-                                maxEntrySize: parseInt(match[8]!, 10),
-                                maxPayloadSize: parseInt(match[9]!, 10),
-                            });
-                            return;
-                        }
+        for await (const line of stdout
+            .pipeThrough(new TextDecoderStream())
+            .pipeThrough(new SplitStringStream("\n"))) {
+            let match = line.match(Logcat.LOG_SIZE_REGEX_11);
+            if (match) {
+                result.push({
+                    id: Logcat.logNameToId(match[1]!),
+                    size: Logcat.parseSize(
+                        Number.parseInt(match[2]!, 10),
+                        match[3]!,
+                    ),
+                    readable: Logcat.parseSize(
+                        Number.parseInt(match[6]!, 10),
+                        match[7]!,
+                    ),
+                    consumed: Logcat.parseSize(
+                        Number.parseInt(match[4]!, 10),
+                        match[5]!,
+                    ),
+                    maxEntrySize: parseInt(match[8]!, 10),
+                    maxPayloadSize: parseInt(match[9]!, 10),
+                });
+                break;
+            }
 
-                        match = chunk.match(Logcat.LOG_SIZE_REGEX_10);
-                        if (match) {
-                            result.push({
-                                id: Logcat.logNameToId(match[1]!),
-                                size: Logcat.parseSize(
-                                    Number.parseInt(match[2]!, 10),
-                                    match[3]!,
-                                ),
-                                consumed: Logcat.parseSize(
-                                    Number.parseInt(match[4]!, 10),
-                                    match[5]!,
-                                ),
-                                maxEntrySize: parseInt(match[6]!, 10),
-                                maxPayloadSize: parseInt(match[7]!, 10),
-                            });
-                        }
-                    },
-                }),
-            );
+            match = line.match(Logcat.LOG_SIZE_REGEX_10);
+            if (match) {
+                result.push({
+                    id: Logcat.logNameToId(match[1]!),
+                    size: Logcat.parseSize(
+                        Number.parseInt(match[2]!, 10),
+                        match[3]!,
+                    ),
+                    consumed: Logcat.parseSize(
+                        Number.parseInt(match[4]!, 10),
+                        match[5]!,
+                    ),
+                    maxEntrySize: parseInt(match[6]!, 10),
+                    maxPayloadSize: parseInt(match[7]!, 10),
+                });
+            }
+        }
 
         return result;
     }
 
-    async clear(ids?: LogId[]) {
+    async clear(ids?: LogId[]): Promise<void> {
         const args = ["logcat", "-c"];
         if (ids && ids.length > 0) {
             args.push("-b", Logcat.joinLogId(ids));

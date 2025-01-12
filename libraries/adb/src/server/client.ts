@@ -1,277 +1,84 @@
 // cspell:ignore tport
 
+import type { MaybePromiseLike } from "@yume-chan/async";
 import { PromiseResolver } from "@yume-chan/async";
+import type { Event } from "@yume-chan/event";
+import { getUint64LittleEndian } from "@yume-chan/no-data-view";
 import type {
     AbortSignal,
+    MaybeConsumable,
     ReadableWritablePair,
-    WritableStreamDefaultWriter,
 } from "@yume-chan/stream-extra";
-import {
-    BufferedReadableStream,
-    UnwrapConsumableStream,
-    WrapWritableStream,
-} from "@yume-chan/stream-extra";
-import type {
-    AsyncExactReadable,
-    ExactReadable,
-    ValueOrPromise,
-} from "@yume-chan/struct";
-import {
-    BigIntFieldType,
-    EMPTY_UINT8_ARRAY,
-    SyncPromise,
-    decodeUtf8,
-    encodeUtf8,
-} from "@yume-chan/struct";
+import { AbortController } from "@yume-chan/stream-extra";
 
 import type { AdbIncomingSocketHandler, AdbSocket, Closeable } from "../adb.js";
 import { AdbBanner } from "../banner.js";
+import type { DeviceObserver as DeviceObserverBase } from "../device-observer.js";
 import type { AdbFeature } from "../features.js";
-import { NOOP, hexToNumber, numberToHex } from "../utils/index.js";
+import { hexToNumber, sequenceEqual } from "../utils/index.js";
 
+import { AdbServerDeviceObserverOwner } from "./observer.js";
+import { AdbServerStream, FAIL } from "./stream.js";
 import { AdbServerTransport } from "./transport.js";
 
-export interface AdbServerConnectionOptions {
-    unref?: boolean | undefined;
-    signal?: AbortSignal | undefined;
-}
-
-export interface AdbServerConnection
-    extends ReadableWritablePair<Uint8Array, Uint8Array>,
-        Closeable {
-    get closed(): Promise<void>;
-}
-
-export interface AdbServerConnector {
-    connect(
-        options?: AdbServerConnectionOptions,
-    ): ValueOrPromise<AdbServerConnection>;
-
-    addReverseTunnel(
-        handler: AdbIncomingSocketHandler,
-        address?: string,
-    ): ValueOrPromise<string>;
-
-    removeReverseTunnel(address: string): ValueOrPromise<void>;
-
-    clearReverseTunnels(): ValueOrPromise<void>;
-}
-
-export interface AdbServerSocket extends AdbSocket {
-    transportId: bigint;
-}
-
-export type AdbServerDeviceSelector =
-    | { transportId: bigint }
-    | { serial: string }
-    | { usb: true }
-    | { tcp: true }
-    | undefined;
-
-export interface AdbServerDevice {
-    serial: string;
-    product?: string | undefined;
-    model?: string | undefined;
-    device?: string | undefined;
-    transportId: bigint;
-}
-
+/**
+ * Client for the ADB Server.
+ */
 export class AdbServerClient {
-    static readonly VERSION = 41;
-
-    readonly connection: AdbServerConnector;
-
-    constructor(connection: AdbServerConnector) {
-        this.connection = connection;
-    }
-
-    static readString(stream: ExactReadable): string;
-    static readString(stream: AsyncExactReadable): PromiseLike<string>;
-    static readString(
-        stream: ExactReadable | AsyncExactReadable,
-    ): string | PromiseLike<string> {
-        return SyncPromise.try(() => stream.readExactly(4))
-            .then((buffer) => {
-                const length = hexToNumber(buffer);
-                if (length === 0) {
-                    return EMPTY_UINT8_ARRAY;
-                } else {
-                    return stream.readExactly(length);
-                }
-            })
-            .then((valueBuffer) => {
-                return decodeUtf8(valueBuffer);
-            })
-            .valueOrPromise();
-    }
-
-    static async writeString(
-        writer: WritableStreamDefaultWriter<Uint8Array>,
-        value: string,
-    ): Promise<void> {
-        const valueBuffer = encodeUtf8(value);
-        const buffer = new Uint8Array(4 + valueBuffer.length);
-        buffer.set(numberToHex(valueBuffer.length));
-        buffer.set(valueBuffer, 4);
-        await writer.write(buffer);
-    }
-
-    static async readOkay(
-        stream: ExactReadable | AsyncExactReadable,
-    ): Promise<void> {
-        const response = decodeUtf8(await stream.readExactly(4));
-        if (response === "OKAY") {
-            return;
-        }
-
-        if (response === "FAIL") {
-            const reason = await AdbServerClient.readString(stream);
-            throw new Error(reason);
-        }
-
-        throw new Error(`Unexpected response: ${response}`);
-    }
-
-    async connect(
-        request: string,
-        options?: AdbServerConnectionOptions,
-    ): Promise<AdbServerConnection> {
-        const connection = await this.connection.connect(options);
-
-        try {
-            const writer = connection.writable.getWriter();
-            await AdbServerClient.writeString(writer, request);
-            writer.releaseLock();
-        } catch (e) {
-            await connection.readable.cancel();
-            await connection.close();
-            throw e;
-        }
-
-        const readable = new BufferedReadableStream(connection.readable);
-        try {
-            // `raceSignal` throws when the signal is aborted,
-            // so the `catch` block can close the connection.
-            await raceSignal(
-                () => AdbServerClient.readOkay(readable),
-                options?.signal,
-            );
-
-            return {
-                readable: readable.release(),
-                writable: connection.writable,
-                get closed() {
-                    return connection.closed;
-                },
-                async close() {
-                    await connection.close();
-                },
-            };
-        } catch (e) {
-            await readable.cancel().catch(NOOP);
-            await connection.close();
-            throw e;
-        }
-    }
-
-    async getVersion(): Promise<number> {
-        const connection = await this.connect("host:version");
-        const readable = new BufferedReadableStream(connection.readable);
-        try {
-            const length = hexToNumber(await readable.readExactly(4));
-            const version = hexToNumber(await readable.readExactly(length));
-            return version;
-        } finally {
-            connection.writable.close().catch(NOOP);
-            readable.cancel().catch(NOOP);
-        }
-    }
-
-    async validateVersion() {
-        const version = await this.getVersion();
-        if (version !== AdbServerClient.VERSION) {
-            throw new Error(
-                `adb server version (${version}) doesn't match this client (${AdbServerClient.VERSION})`,
-            );
-        }
-    }
-
-    async killServer(): Promise<void> {
-        const connection = await this.connect("host:kill");
-        connection.writable.close().catch(NOOP);
-        connection.readable.cancel().catch(NOOP);
-    }
-
-    async getServerFeatures(): Promise<AdbFeature[]> {
-        const connection = await this.connect("host:host-features");
-        const readable = new BufferedReadableStream(connection.readable);
-        try {
-            const response = await AdbServerClient.readString(readable);
-            return response.split(",") as AdbFeature[];
-        } finally {
-            connection.writable.close().catch(NOOP);
-            readable.cancel().catch(NOOP);
-        }
-    }
-
-    async getDevices(): Promise<AdbServerDevice[]> {
-        const connection = await this.connect("host:devices-l");
-        const readable = new BufferedReadableStream(connection.readable);
-        try {
-            const devices: AdbServerDevice[] = [];
-            const response = await AdbServerClient.readString(readable);
-            for (const line of response.split("\n")) {
-                if (!line) {
-                    continue;
-                }
-
-                const parts = line.split(" ").filter(Boolean);
-                const serial = parts[0]!;
-                const status = parts[1]!;
-                if (status !== "device") {
-                    continue;
-                }
-
-                let product: string | undefined;
-                let model: string | undefined;
-                let device: string | undefined;
-                let transportId: bigint | undefined;
-                for (let i = 2; i < parts.length; i += 1) {
-                    const [key, value] = parts[i]!.split(":");
-                    switch (key) {
-                        case "product":
-                            product = value;
-                            break;
-                        case "model":
-                            model = value;
-                            break;
-                        case "device":
-                            device = value;
-                            break;
-                        case "transport_id":
-                            transportId = BigInt(value!);
-                            break;
-                    }
-                }
-                if (!transportId) {
-                    throw new Error(`No transport id for device ${serial}`);
-                }
-                devices.push({
-                    serial,
-                    product,
-                    model,
-                    device,
-                    transportId,
-                });
+    static parseDeviceList(value: string): AdbServerClient.Device[] {
+        const devices: AdbServerClient.Device[] = [];
+        for (const line of value.split("\n")) {
+            if (!line) {
+                continue;
             }
-            return devices;
-        } finally {
-            connection.writable.close().catch(NOOP);
-            readable.cancel().catch(NOOP);
+
+            const parts = line.split(" ").filter(Boolean);
+            const serial = parts[0]!;
+            const status = parts[1]!;
+            if (status !== "device" && status !== "unauthorized") {
+                continue;
+            }
+
+            let product: string | undefined;
+            let model: string | undefined;
+            let device: string | undefined;
+            let transportId: bigint | undefined;
+            for (let i = 2; i < parts.length; i += 1) {
+                const [key, value] = parts[i]!.split(":");
+                switch (key) {
+                    case "product":
+                        product = value;
+                        break;
+                    case "model":
+                        model = value;
+                        break;
+                    case "device":
+                        device = value;
+                        break;
+                    case "transport_id":
+                        transportId = BigInt(value!);
+                        break;
+                }
+            }
+            if (!transportId) {
+                throw new Error(`No transport id for device ${serial}`);
+            }
+            devices.push({
+                serial,
+                authenticating: status === "unauthorized",
+                product,
+                model,
+                device,
+                transportId,
+            });
         }
+        return devices;
     }
 
-    formatDeviceService(device: AdbServerDeviceSelector, command: string) {
+    static formatDeviceService(
+        device: AdbServerClient.DeviceSelector,
+        command: string,
+    ) {
         if (!device) {
             return `host:${command}`;
         }
@@ -287,7 +94,126 @@ export class AdbServerClient {
         if ("tcp" in device) {
             return `host-local:${command}`;
         }
-        throw new Error("Invalid device selector");
+        throw new TypeError("Invalid device selector");
+    }
+
+    readonly connector: AdbServerClient.ServerConnector;
+
+    readonly wireless = new AdbServerClient.WirelessCommands(this);
+    readonly mDns = new AdbServerClient.MDnsCommands(this);
+    #observerOwner = new AdbServerDeviceObserverOwner(this);
+
+    constructor(connector: AdbServerClient.ServerConnector) {
+        this.connector = connector;
+    }
+
+    async createConnection(
+        request: string,
+        options?: AdbServerClient.ServerConnectionOptions,
+    ): Promise<AdbServerStream> {
+        const connection = await this.connector.connect(options);
+        const stream = new AdbServerStream(connection);
+
+        try {
+            await stream.writeString(request);
+        } catch (e) {
+            await stream.dispose();
+            throw e;
+        }
+
+        try {
+            // `raceSignal` throws when the signal is aborted,
+            // so the `catch` block can close the connection.
+            await raceSignal(() => stream.readOkay(), options?.signal);
+            return stream;
+        } catch (e) {
+            await stream.dispose();
+            throw e;
+        }
+    }
+
+    /**
+     * `adb version`
+     */
+    async getVersion(): Promise<number> {
+        const connection = await this.createConnection("host:version");
+        try {
+            const length = hexToNumber(await connection.readExactly(4));
+            const version = hexToNumber(await connection.readExactly(length));
+            return version;
+        } finally {
+            await connection.dispose();
+        }
+    }
+
+    async validateVersion(minimalVersion: number) {
+        const version = await this.getVersion();
+        if (version < minimalVersion) {
+            throw new Error(
+                `adb server version (${version}) doesn't match this client (${minimalVersion})`,
+            );
+        }
+    }
+
+    /**
+     * `adb kill-server`
+     */
+    async killServer(): Promise<void> {
+        const connection = await this.createConnection("host:kill");
+        await connection.dispose();
+    }
+
+    /**
+     * `adb host-features`
+     */
+    async getServerFeatures(): Promise<AdbFeature[]> {
+        const connection = await this.createConnection("host:host-features");
+        try {
+            const response = await connection.readString();
+            return response.split(",") as AdbFeature[];
+        } finally {
+            await connection.dispose();
+        }
+    }
+
+    /**
+     * Get a list of connected devices from ADB Server.
+     *
+     * Equivalent ADB Command: `adb devices -l`
+     */
+    async getDevices(): Promise<AdbServerClient.Device[]> {
+        const connection = await this.createConnection("host:devices-l");
+        try {
+            const response = await connection.readString();
+            return AdbServerClient.parseDeviceList(response);
+        } finally {
+            await connection.dispose();
+        }
+    }
+
+    /**
+     * Monitors device list changes.
+     */
+    async trackDevices(
+        options?: AdbServerClient.ServerConnectionOptions,
+    ): Promise<AdbServerClient.DeviceObserver> {
+        return this.#observerOwner.createObserver(options);
+    }
+
+    /**
+     * `adb -s <device> reconnect` or `adb reconnect offline`
+     */
+    async reconnectDevice(device: AdbServerClient.DeviceSelector | "offline") {
+        const connection = await this.createConnection(
+            device === "offline"
+                ? "host:reconnect-offline"
+                : AdbServerClient.formatDeviceService(device, "reconnect"),
+        );
+        try {
+            await connection.readString();
+        } finally {
+            await connection.dispose();
+        }
     }
 
     /**
@@ -298,23 +224,36 @@ export class AdbServerClient {
      * @returns The transport ID of the selected device, and the features supported by the device.
      */
     async getDeviceFeatures(
-        device: AdbServerDeviceSelector,
+        device: AdbServerClient.DeviceSelector,
     ): Promise<{ transportId: bigint; features: AdbFeature[] }> {
-        // Usually the client sends a device command using `connectDevice`,
-        // so the command got forwarded and handled by ADB daemon.
-        // However, in fact, `connectDevice` only forwards unknown services to device,
-        // if the service is a host command, it will still be handled by ADB server.
-        // Also, if the command is about a device, but didn't specify a selector,
-        // it will be executed against the device selected previously by `connectDevice`.
-        // Using this method, we can get the transport ID and device features in one connection.
-        const socket = await this.connectDevice(device, "host:features");
+        // On paper, `host:features` is a host service (device features are cached in host),
+        // so it shouldn't use `createDeviceConnection`,
+        // which is used to forward the service to the device.
+        //
+        // However, `createDeviceConnection` is a two step process:
+        //
+        //    1. Send a switch device service to host, to switch the connection to the device.
+        //    2. Send the actual service to host, let it forward the service to the device.
+        //
+        // In step 2, the host only forward the service to device if the service is unknown to host.
+        // If the service is a host service, it's still handled by host.
+        //
+        // Even better, if the service needs a device selector, but the selector is not provided,
+        // the service will be executed against the device selected by the switch device service.
+        // So we can use all device selector formats for the host service,
+        // and get the transport ID in the same time.
+        const connection = await this.createDeviceConnection(
+            device,
+            "host:features",
+        );
+        // Luckily `AdbServerClient.Socket` is compatible with `AdbServerClient.ServerConnection`
+        const stream = new AdbServerStream(connection);
         try {
-            const readable = new BufferedReadableStream(socket.readable);
-            const featuresString = await AdbServerClient.readString(readable);
+            const featuresString = await stream.readString();
             const features = featuresString.split(",") as AdbFeature[];
-            return { transportId: socket.transportId, features };
+            return { transportId: connection.transportId, features };
         } finally {
-            await socket.close();
+            await stream.dispose();
         }
     }
 
@@ -322,90 +261,73 @@ export class AdbServerClient {
      * Creates a connection that will forward the service to device.
      * @param device The device selector
      * @param service The service to forward
-     * @returns An `AdbServerSocket` that can be used to communicate with the service
+     * @returns An `AdbServerClient.Socket` that can be used to communicate with the service
      */
-    async connectDevice(
-        device: AdbServerDeviceSelector,
+    async createDeviceConnection(
+        device: AdbServerClient.DeviceSelector,
         service: string,
-    ): Promise<AdbServerSocket> {
-        await this.validateVersion();
-
+    ): Promise<AdbServerClient.Socket> {
         let switchService: string;
         let transportId: bigint | undefined;
         if (!device) {
+            await this.validateVersion(41);
             switchService = `host:tport:any`;
         } else if ("transportId" in device) {
             switchService = `host:transport-id:${device.transportId}`;
             transportId = device.transportId;
         } else if ("serial" in device) {
+            await this.validateVersion(41);
             switchService = `host:tport:serial:${device.serial}`;
         } else if ("usb" in device) {
+            await this.validateVersion(41);
             switchService = `host:tport:usb`;
         } else if ("tcp" in device) {
+            await this.validateVersion(41);
             switchService = `host:tport:local`;
         } else {
-            throw new Error("Invalid device selector");
+            throw new TypeError("Invalid device selector");
         }
 
-        const connection = await this.connect(switchService);
+        const connection = await this.createConnection(switchService);
 
         try {
-            const writer = connection.writable.getWriter();
-            await AdbServerClient.writeString(writer, service);
-            writer.releaseLock();
+            await connection.writeString(service);
         } catch (e) {
-            await connection.readable.cancel();
-            await connection.close();
+            await connection.dispose();
             throw e;
         }
 
-        const readable = new BufferedReadableStream(connection.readable);
         try {
             if (transportId === undefined) {
-                const array = await readable.readExactly(8);
-                // TODO: switch to a more performant algorithm.
-                const dataView = new DataView(
-                    array.buffer,
-                    array.byteOffset,
-                    array.byteLength,
-                );
-                transportId = BigIntFieldType.Uint64.getter(dataView, 0, true);
+                const array = await connection.readExactly(8);
+                transportId = getUint64LittleEndian(array, 0);
             }
 
-            await AdbServerClient.readOkay(readable);
+            await connection.readOkay();
+
+            const socket = connection.release();
 
             return {
                 transportId,
                 service,
-                readable: readable.release(),
-                writable: new WrapWritableStream(
-                    connection.writable,
-                ).bePipedThroughFrom(new UnwrapConsumableStream()),
+                readable: socket.readable,
+                writable: socket.writable,
                 get closed() {
-                    return connection.closed;
+                    return socket.closed;
                 },
                 async close() {
-                    await connection.close();
+                    await socket.close();
                 },
             };
         } catch (e) {
-            await readable.cancel().catch(NOOP);
-            await connection.close();
+            await connection.dispose();
             throw e;
         }
     }
-
-    /**
-     * Wait for a device to be connected or disconnected.
-     * @param device The device selector
-     * @param state The state to wait for
-     * @param options The options
-     * @returns A promise that resolves when the condition is met.
-     */
-    async waitFor(
-        device: AdbServerDeviceSelector,
+    async #waitForUnchecked(
+        device: AdbServerClient.DeviceSelector,
         state: "device" | "disconnect",
-        options?: AdbServerConnectionOptions,
+        options?: AdbServerClient.ServerConnectionOptions,
     ): Promise<void> {
         let type: string;
         if (!device) {
@@ -419,23 +341,83 @@ export class AdbServerClient {
         } else if ("tcp" in device) {
             type = "local";
         } else {
-            throw new Error("Invalid device selector");
+            throw new TypeError("Invalid device selector");
         }
 
         // `waitFor` can't use `connectDevice`, because the device
         // might not be available yet.
-        const service = this.formatDeviceService(
+        const service = AdbServerClient.formatDeviceService(
             device,
             `wait-for-${type}-${state}`,
         );
 
-        // `connect` resolves when server writes `OKAY`,
-        // but for this command the server writes `OKAY` after the condition is met.
-        await this.connect(service, options);
+        const connection = await this.createConnection(service, options);
+        try {
+            await connection.readOkay();
+        } finally {
+            await connection.dispose();
+        }
     }
 
+    /**
+     * Wait for a device to be connected or disconnected.
+     *
+     * `adb wait-for-<state>`
+     *
+     * @param device The device selector
+     * @param state The state to wait for
+     * @param options The options
+     * @returns A promise that resolves when the condition is met.
+     */
+    async waitFor(
+        device: AdbServerClient.DeviceSelector,
+        state: "device" | "disconnect",
+        options?: AdbServerClient.ServerConnectionOptions,
+    ): Promise<void> {
+        if (state === "disconnect") {
+            await this.validateVersion(41);
+        }
+
+        return this.#waitForUnchecked(device, state, options);
+    }
+
+    async waitForDisconnect(
+        transportId: bigint,
+        options?: AdbServerClient.ServerConnectionOptions,
+    ): Promise<void> {
+        const serverVersion = await this.getVersion();
+        if (serverVersion >= 41) {
+            return this.#waitForUnchecked(
+                { transportId },
+                "disconnect",
+                options,
+            );
+        } else {
+            const observer = await this.trackDevices(options);
+            return new Promise<void>((resolve, reject) => {
+                observer.onDeviceRemove((devices) => {
+                    if (
+                        devices.some(
+                            (device) => device.transportId === transportId,
+                        )
+                    ) {
+                        observer.stop();
+                        resolve();
+                    }
+                });
+                observer.onError((e) => {
+                    observer.stop();
+                    reject(e);
+                });
+            });
+        }
+    }
+
+    /**
+     * Creates an ADB Transport for the specified device.
+     */
     async createTransport(
-        device: AdbServerDeviceSelector,
+        device: AdbServerClient.DeviceSelector,
     ): Promise<AdbServerTransport> {
         const { transportId, features } = await this.getDeviceFeatures(device);
 
@@ -451,17 +433,31 @@ export class AdbServerClient {
             features,
         );
 
-        return new AdbServerTransport(
+        const waitAbortController = new AbortController();
+        const disconnected = this.waitForDisconnect(transportId, {
+            unref: true,
+            signal: waitAbortController.signal,
+        });
+
+        const transport = new AdbServerTransport(
             this,
             info?.serial ?? "",
             banner,
             transportId,
+            disconnected,
         );
+
+        transport.disconnected.then(
+            () => waitAbortController.abort(),
+            () => waitAbortController.abort(),
+        );
+
+        return transport;
     }
 }
 
 export async function raceSignal<T>(
-    callback: () => Promise<T>,
+    callback: () => PromiseLike<T>,
     ...signals: (AbortSignal | undefined)[]
 ): Promise<T> {
     const abortPromise = new PromiseResolver<never>();
@@ -488,5 +484,191 @@ export async function raceSignal<T>(
             }
             signal.removeEventListener("abort", abort);
         }
+    }
+}
+
+export namespace AdbServerClient {
+    export interface ServerConnectionOptions {
+        unref?: boolean | undefined;
+        signal?: AbortSignal | undefined;
+    }
+
+    export interface ServerConnection
+        extends ReadableWritablePair<Uint8Array, MaybeConsumable<Uint8Array>>,
+            Closeable {
+        get closed(): Promise<void>;
+    }
+
+    export interface ServerConnector {
+        connect(
+            options?: ServerConnectionOptions,
+        ): MaybePromiseLike<ServerConnection>;
+
+        addReverseTunnel(
+            handler: AdbIncomingSocketHandler,
+            address?: string,
+        ): MaybePromiseLike<string>;
+
+        removeReverseTunnel(address: string): MaybePromiseLike<void>;
+
+        clearReverseTunnels(): MaybePromiseLike<void>;
+    }
+
+    export interface Socket extends AdbSocket {
+        transportId: bigint;
+    }
+
+    /**
+     * A union type for selecting a device.
+     */
+    export type DeviceSelector =
+        | { transportId: bigint }
+        | { serial: string }
+        | { usb: true }
+        | { tcp: true }
+        | undefined;
+
+    export interface Device {
+        serial: string;
+        authenticating: boolean;
+        product?: string | undefined;
+        model?: string | undefined;
+        device?: string | undefined;
+        transportId: bigint;
+    }
+
+    export class NetworkError extends Error {
+        constructor(message: string) {
+            super(message);
+            this.name = "NetworkError";
+        }
+    }
+
+    export class UnauthorizedError extends Error {
+        constructor(message: string) {
+            super(message);
+            this.name = "UnauthorizedError";
+        }
+    }
+
+    export class AlreadyConnectedError extends Error {
+        constructor(message: string) {
+            super(message);
+            this.name = "AlreadyConnectedError";
+        }
+    }
+
+    export class WirelessCommands {
+        #client: AdbServerClient;
+
+        constructor(client: AdbServerClient) {
+            this.#client = client;
+        }
+
+        /**
+         * `adb pair <password> <address>`
+         */
+        async pair(address: string, password: string): Promise<void> {
+            const connection = await this.#client.createConnection(
+                `host:pair:${password}:${address}`,
+            );
+            try {
+                const response = await connection.readExactly(4);
+                // `response` is either `FAIL`, or 4 hex digits for length of the string
+                if (sequenceEqual(response, FAIL)) {
+                    throw new Error(await connection.readString());
+                }
+                const length = hexToNumber(response);
+                // Ignore the string as it's always `Successful ...`
+                await connection.readExactly(length);
+            } finally {
+                await connection.dispose();
+            }
+        }
+
+        /**
+         * `adb connect <address>`
+         */
+        async connect(address: string): Promise<void> {
+            const connection = await this.#client.createConnection(
+                `host:connect:${address}`,
+            );
+            try {
+                const response = await connection.readString();
+                switch (response) {
+                    case `already connected to ${address}`:
+                        throw new AdbServerClient.AlreadyConnectedError(
+                            response,
+                        );
+                    case `failed to connect to ${address}`: // `adb pair` mode not authorized
+                    case `failed to authenticate to ${address}`: // `adb tcpip` mode not authorized
+                        throw new AdbServerClient.UnauthorizedError(response);
+                    case `connected to ${address}`:
+                        return;
+                    default:
+                        throw new AdbServerClient.NetworkError(response);
+                }
+            } finally {
+                await connection.dispose();
+            }
+        }
+
+        /**
+         * `adb disconnect <address>`
+         */
+        async disconnect(address: string): Promise<void> {
+            const connection = await this.#client.createConnection(
+                `host:disconnect:${address}`,
+            );
+            try {
+                await connection.readString();
+            } finally {
+                await connection.dispose();
+            }
+        }
+    }
+
+    export class MDnsCommands {
+        #client: AdbServerClient;
+
+        constructor(client: AdbServerClient) {
+            this.#client = client;
+        }
+
+        async check() {
+            const connection =
+                await this.#client.createConnection("host:mdns:check");
+            try {
+                const response = await connection.readString();
+                return !response.startsWith("ERROR:");
+            } finally {
+                await connection.dispose();
+            }
+        }
+
+        async getServices() {
+            const connection =
+                await this.#client.createConnection("host:mdns:services");
+            try {
+                const response = await connection.readString();
+                return response
+                    .split("\n")
+                    .filter(Boolean)
+                    .map((line) => {
+                        const parts = line.split("\t");
+                        return {
+                            name: parts[0]!,
+                            service: parts[1]!,
+                            address: parts[2]!,
+                        };
+                    });
+            } finally {
+                await connection.dispose();
+            }
+        }
+    }
+
+    export interface DeviceObserver extends DeviceObserverBase<Device> {
+        onError: Event<Error>;
     }
 }

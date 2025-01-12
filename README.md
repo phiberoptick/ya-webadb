@@ -29,13 +29,15 @@ Try it out at https://app.tangoapp.dev
 
 ## Documentation
 
-Check the latest documentation at https://tango-adb.github.io/docs/
+Check the latest documentation at https://docs.tangoapp.dev/
 
 ## Contribute
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for how to run and develop this project.
 
 ## Sponsors
+
+This project is tested with BrowserStack
 
 [Become a backer](https://opencollective.com/ya-webadb) and get your image on our README on Github with a link to your site.
 

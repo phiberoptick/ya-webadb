@@ -1,5 +1,5 @@
+import type { MaybePromiseLike } from "@yume-chan/async";
 import { PromiseResolver } from "@yume-chan/async";
-import type { ValueOrPromise } from "@yume-chan/struct";
 
 import type {
     QueuingStrategy,
@@ -8,6 +8,7 @@ import type {
     WritableStreamDefaultWriter,
 } from "./stream.js";
 import { WritableStream } from "./stream.js";
+import { tryClose } from "./try-close.js";
 import { WrapReadableStream } from "./wrap-readable.js";
 
 const NOOP = () => {
@@ -27,7 +28,7 @@ export interface DuplexStreamFactoryOptions {
      * `DuplexStreamFactory#dispose` yourself, you can return `false`
      * (or a `Promise` that resolves to `false`) to disable the automatic call.
      */
-    close?: (() => ValueOrPromise<boolean | void>) | undefined;
+    close?: (() => MaybePromiseLike<boolean | void>) | undefined;
 
     /**
      * Callback when any `ReadableStream` is closed (the other peer doesn't produce any more data),
@@ -134,11 +135,7 @@ export class DuplexStreamFactory<R, W> {
         this.#closed.resolve();
 
         for (const controller of this.#readableControllers) {
-            try {
-                controller.close();
-            } catch {
-                // ignore
-            }
+            tryClose(controller);
         }
 
         await this.#options.dispose?.();
