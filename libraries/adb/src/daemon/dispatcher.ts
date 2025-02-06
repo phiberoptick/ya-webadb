@@ -3,40 +3,83 @@ import {
     PromiseResolver,
     delay,
 } from "@yume-chan/async";
+import {
+    getUint32LittleEndian,
+    setUint32LittleEndian,
+} from "@yume-chan/no-data-view";
 import type {
-    Consumable,
     ReadableWritablePair,
     WritableStreamDefaultWriter,
 } from "@yume-chan/stream-extra";
 import {
     AbortController,
-    ConsumableWritableStream,
+    Consumable,
     WritableStream,
 } from "@yume-chan/stream-extra";
-import { EMPTY_UINT8_ARRAY } from "@yume-chan/struct";
+import { EmptyUint8Array, decodeUtf8, encodeUtf8 } from "@yume-chan/struct";
 
 import type { AdbIncomingSocketHandler, AdbSocket, Closeable } from "../adb.js";
-import { decodeUtf8, encodeUtf8 } from "../utils/index.js";
 
 import type { AdbPacketData, AdbPacketInit } from "./packet.js";
 import { AdbCommand, calculateChecksum } from "./packet.js";
 import { AdbDaemonSocketController } from "./socket.js";
 
 export interface AdbPacketDispatcherOptions {
-    calculateChecksum: boolean;
     /**
-     * Before Android 9.0, ADB uses `char*` to parse service string,
+     * From Android 9.0, ADB stopped checking the checksum in packet header to improve performance.
+     *
+     * The value should be inferred from the device's ADB protocol version.
+     */
+    calculateChecksum: boolean;
+
+    /**
+     * Before Android 9.0, ADB uses `char*` to parse service strings,
      * thus requires a null character to terminate.
      *
-     * Usually it should have the same value as `calculateChecksum`.
+     * The value should be inferred from the device's ADB protocol version.
+     * Usually it should have the same value as `calculateChecksum`, since they both changed
+     * in Android 9.0.
      */
     appendNullToServiceString: boolean;
+
     maxPayloadSize: number;
+
     /**
-     * Whether to preserve the connection open after the `AdbPacketDispatcher` is closed.
+     * Whether to keep the `connection` open (don't call `writable.close` and `readable.cancel`)
+     * when `AdbPacketDispatcher.close` is called.
+     *
+     * @default false
      */
     preserveConnection?: boolean | undefined;
-    debugSlowRead?: boolean | undefined;
+
+    /**
+     * The number of bytes the device can send before receiving an ack packet.
+     * Using delayed ack can improve the throughput,
+     * especially when the device is connected over Wi-Fi (so the latency is higher).
+     *
+     * This must be the negotiated value between the client and device. If the device enabled
+     * delayed ack but the client didn't, the device will throw an error when the client sends
+     * the first `WRTE` packet. And vice versa.
+     */
+    initialDelayedAckBytes: number;
+
+    /**
+     * When set, the dispatcher will throw an error when
+     * one of the socket readable stalls for this amount of milliseconds.
+     *
+     * Because ADB is a multiplexed protocol, blocking one socket will also block all other sockets.
+     * It's important to always read from all sockets to prevent stalling.
+     *
+     * This option is helpful to detect bugs in the client code.
+     *
+     * @default false
+     */
+    readTimeLimit?: number | undefined;
+}
+
+interface SocketOpenResult {
+    remoteId: number;
+    availableWriteBytes: number;
 }
 
 /**
@@ -79,6 +122,10 @@ export class AdbPacketDispatcher implements Closeable {
         options: AdbPacketDispatcherOptions,
     ) {
         this.options = options;
+        // Don't allow negative values in dispatcher
+        if (this.options.initialDelayedAckBytes < 0) {
+            this.options.initialDelayedAckBytes = 0;
+        }
 
         connection.readable
             .pipeTo(
@@ -169,38 +216,104 @@ export class AdbPacketDispatcher implements Closeable {
     }
 
     #handleOkay(packet: AdbPacketData) {
-        if (this.#initializers.resolve(packet.arg1, packet.arg0)) {
+        let ackBytes: number;
+        if (this.options.initialDelayedAckBytes !== 0) {
+            if (packet.payload.length !== 4) {
+                throw new Error(
+                    "Invalid OKAY packet. Payload size should be 4",
+                );
+            }
+            ackBytes = getUint32LittleEndian(packet.payload, 0);
+        } else {
+            if (packet.payload.length !== 0) {
+                throw new Error(
+                    "Invalid OKAY packet. Payload size should be 0",
+                );
+            }
+            ackBytes = Infinity;
+        }
+
+        if (
+            this.#initializers.resolve(packet.arg1, {
+                remoteId: packet.arg0,
+                availableWriteBytes: ackBytes,
+            } satisfies SocketOpenResult)
+        ) {
             // Device successfully created the socket
             return;
         }
 
         const socket = this.#sockets.get(packet.arg1);
         if (socket) {
-            // Device has received last `WRTE` to the socket
-            socket.ack();
+            // When delayed ack is enabled, `ackBytes` is a positive number represents
+            // how many bytes the device has received from this socket.
+            // When delayed ack is disabled, `ackBytes` is always `Infinity` represents
+            // the device has received last `WRTE` packet from the socket.
+            socket.ack(ackBytes);
             return;
         }
 
         // Maybe the device is responding to a packet of last connection
         // Tell the device to close the socket
-        void this.sendPacket(AdbCommand.Close, packet.arg1, packet.arg0);
+        void this.sendPacket(
+            AdbCommand.Close,
+            packet.arg1,
+            packet.arg0,
+            EmptyUint8Array,
+        );
+    }
+
+    #sendOkay(localId: number, remoteId: number, ackBytes: number) {
+        let payload: Uint8Array;
+        if (this.options.initialDelayedAckBytes !== 0) {
+            // TODO: try reusing this buffer to reduce memory allocation
+            // However, that requires blocking reentrance of `sendOkay`, which might be more expensive
+            payload = new Uint8Array(4);
+            setUint32LittleEndian(payload, 0, ackBytes);
+        } else {
+            payload = EmptyUint8Array;
+        }
+
+        return this.sendPacket(AdbCommand.Okay, localId, remoteId, payload);
     }
 
     async #handleOpen(packet: AdbPacketData) {
-        // `AsyncOperationManager` doesn't support skipping IDs
-        // Use `add` + `resolve` to simulate this behavior
+        // Allocate a local ID for the socket from `#initializers`.
+        // `AsyncOperationManager` doesn't directly support returning the next ID,
+        // so use `add` + `resolve` to simulate this
         const [localId] = this.#initializers.add<number>();
         this.#initializers.resolve(localId, undefined);
 
         const remoteId = packet.arg0;
+        let availableWriteBytes = packet.arg1;
         let service = decodeUtf8(packet.payload);
+        // ADB Daemon still adds a null character to the service string
         if (service.endsWith("\0")) {
             service = service.substring(0, service.length - 1);
         }
 
+        // Check remote delayed ack enablement is consistent with local
+        if (this.options.initialDelayedAckBytes === 0) {
+            if (availableWriteBytes !== 0) {
+                throw new Error("Invalid OPEN packet. arg1 should be 0");
+            }
+            availableWriteBytes = Infinity;
+        } else {
+            if (availableWriteBytes === 0) {
+                throw new Error(
+                    "Invalid OPEN packet. arg1 should be greater than 0",
+                );
+            }
+        }
+
         const handler = this.#incomingSocketHandlers.get(service);
         if (!handler) {
-            await this.sendPacket(AdbCommand.Close, 0, remoteId);
+            await this.sendPacket(
+                AdbCommand.Close,
+                0,
+                remoteId,
+                EmptyUint8Array,
+            );
             return;
         }
 
@@ -210,14 +323,24 @@ export class AdbPacketDispatcher implements Closeable {
             remoteId,
             localCreated: false,
             service,
+            availableWriteBytes,
         });
 
         try {
             await handler(controller.socket);
             this.#sockets.set(localId, controller);
-            await this.sendPacket(AdbCommand.Okay, localId, remoteId);
-        } catch (e) {
-            await this.sendPacket(AdbCommand.Close, 0, remoteId);
+            await this.#sendOkay(
+                localId,
+                remoteId,
+                this.options.initialDelayedAckBytes,
+            );
+        } catch {
+            await this.sendPacket(
+                AdbCommand.Close,
+                0,
+                remoteId,
+                EmptyUint8Array,
+            );
         }
     }
 
@@ -228,26 +351,33 @@ export class AdbPacketDispatcher implements Closeable {
         }
 
         let handled = false;
-        await Promise.race([
-            delay(5000).then(() => {
-                if (this.options.debugSlowRead && !handled) {
-                    throw new Error(
-                        `packet for \`${socket.service}\` not handled in 5 seconds`,
-                    );
-                }
-            }),
+
+        const promises: Promise<void>[] = [
             (async () => {
                 await socket.enqueue(packet.payload);
-                await this.sendPacket(
-                    AdbCommand.Okay,
+                await this.#sendOkay(
                     packet.arg1,
                     packet.arg0,
+                    packet.payload.length,
                 );
                 handled = true;
             })(),
-        ]);
+        ];
 
-        return;
+        if (this.options.readTimeLimit) {
+            promises.push(
+                (async () => {
+                    await delay(this.options.readTimeLimit!);
+                    if (!handled) {
+                        throw new Error(
+                            `readable of \`${socket.service}\` has stalled for ${this.options.readTimeLimit} milliseconds`,
+                        );
+                    }
+                })(),
+            );
+        }
+
+        await Promise.race(promises);
     }
 
     async createSocket(service: string): Promise<AdbSocket> {
@@ -255,17 +385,24 @@ export class AdbPacketDispatcher implements Closeable {
             service += "\0";
         }
 
-        const [localId, initializer] = this.#initializers.add<number>();
-        await this.sendPacket(AdbCommand.Open, localId, 0, service);
+        const [localId, initializer] =
+            this.#initializers.add<SocketOpenResult>();
+        await this.sendPacket(
+            AdbCommand.Open,
+            localId,
+            this.options.initialDelayedAckBytes,
+            service,
+        );
 
-        // Fulfilled by `handleOk`
-        const remoteId = await initializer;
+        // Fulfilled by `handleOkay`
+        const { remoteId, availableWriteBytes } = await initializer;
         const controller = new AdbDaemonSocketController({
             dispatcher: this,
             localId,
             remoteId,
             localCreated: true,
             service,
+            availableWriteBytes,
         });
         this.#sockets.set(localId, controller);
 
@@ -288,17 +425,18 @@ export class AdbPacketDispatcher implements Closeable {
         command: AdbCommand,
         arg0: number,
         arg1: number,
-        payload: string | Uint8Array = EMPTY_UINT8_ARRAY,
+        // PERF: It's slightly faster to not use default parameter values
+        payload: string | Uint8Array,
     ): Promise<void> {
         if (typeof payload === "string") {
             payload = encodeUtf8(payload);
         }
 
-        if (payload.byteLength > this.options.maxPayloadSize) {
-            throw new Error("payload too large");
+        if (payload.length > this.options.maxPayloadSize) {
+            throw new TypeError("payload too large");
         }
 
-        await ConsumableWritableStream.write(this.#writer, {
+        await Consumable.WritableStream.write(this.#writer, {
             command,
             arg0,
             arg1,

@@ -1,6 +1,6 @@
 {
     "name": "@yume-chan/event",
-    "version": "0.0.22",
+    "version": "1.0.0",
     "description": "Event/EventEmitter",
     "keywords": [
         "event",
@@ -25,26 +25,22 @@
     "type": "module",
     "main": "esm/index.js",
     "types": "esm/index.d.ts",
+    "sideEffects": false,
     "scripts": {
         "build": "tsc -b tsconfig.build.json",
-        "build:watch": "tsc -b tsconfig.build.json",
-        "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --coverage",
-        "lint": "eslint src/**/*.ts --fix && prettier src/**/*.ts --write --tab-width 4",
-        "prepublishOnly": "npm run build"
+        "lint": "run-eslint && prettier src/**/*.ts --write --tab-width 4",
+        "prepublishOnly": "npm run build",
+        "test": "run-test"
     },
     "dependencies": {
-        "@yume-chan/async": "^2.2.0",
-        "tslib": "^2.6.2"
+        "@yume-chan/async": "^4.0.2"
     },
     "devDependencies": {
-        "@jest/globals": "^30.0.0-alpha.2",
-        "@yume-chan/eslint-config": "workspace:^1.0.0",
-        "@yume-chan/tsconfig": "workspace:^1.0.0",
-        "cross-env": "^7.0.3",
-        "eslint": "^8.56.0",
-        "jest": "^30.0.0-alpha.2",
-        "prettier": "^3.2.4",
-        "ts-jest": "^29.1.1",
-        "typescript": "^5.3.3"
+        "@types/node": "^22.10.10",
+        "@yume-chan/eslint-config": "workspace:^",
+        "@yume-chan/test-runner": "workspace:^",
+        "@yume-chan/tsconfig": "workspace:^",
+        "prettier": "^3.4.2",
+        "typescript": "^5.7.3"
     }
 }

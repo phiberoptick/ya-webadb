@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
 export class ParseError extends Error {
     #expected: string[];
 
@@ -94,7 +93,7 @@ export const p = {
                     const result = format.stringify(value);
                     // Parse the result to make sure it is valid
                     format.parse({ value: result, position: 0 });
-                } catch (e) {
+                } catch {
                     // ignore
                 }
             }
@@ -104,8 +103,7 @@ export const p = {
     separated: <T>(
         separator: string,
         format: Format<T>,
-        min = 0,
-        max = Infinity,
+        { min = 0, max = Infinity }: { min?: number; max?: number } = {},
     ): Format<T[]> => ({
         parse(reader: Reader) {
             const result: T[] = [];
@@ -143,7 +141,7 @@ export const p = {
             while (true) {
                 try {
                     result.push(format.parse(reader));
-                } catch (e) {
+                } catch {
                     break;
                 }
             }

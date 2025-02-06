@@ -1,6 +1,6 @@
 import type { Adb } from "@yume-chan/adb";
 import { AdbCommandBase } from "@yume-chan/adb";
-import { ConcatStringStream, DecodeUtf8Stream } from "@yume-chan/stream-extra";
+import { ConcatStringStream, TextDecoderStream } from "@yume-chan/stream-extra";
 
 import { Cmd } from "./cmd.js";
 import type { IntentBuilder } from "./intent.js";
@@ -41,7 +41,9 @@ export class ActivityManager extends AdbCommandBase {
         return this.adb.subprocess.spawn(args);
     }
 
-    async startActivity(options: ActivityManagerStartActivityOptions) {
+    async startActivity(
+        options: ActivityManagerStartActivityOptions,
+    ): Promise<void> {
         let args = buildArguments(
             ["am", "start-activity", "-W"],
             options,
@@ -53,7 +55,7 @@ export class ActivityManager extends AdbCommandBase {
         const process = await this.#cmdOrSubprocess(args);
 
         const output = await process.stdout
-            .pipeThrough(new DecodeUtf8Stream())
+            .pipeThrough(new TextDecoderStream())
             .pipeThrough(new ConcatStringStream())
             .then((output) => output.trim());
 

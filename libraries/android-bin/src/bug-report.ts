@@ -6,9 +6,9 @@ import { AdbCommandBase, AdbSubprocessShellProtocol } from "@yume-chan/adb";
 import type { AbortSignal, ReadableStream } from "@yume-chan/stream-extra";
 import {
     AbortController,
-    DecodeUtf8Stream,
     PushReadableStream,
     SplitStringStream,
+    TextDecoderStream,
     WrapReadableStream,
     WritableStream,
 } from "@yume-chan/stream-extra";
@@ -32,15 +32,15 @@ export interface BugReportZOptions {
 }
 
 export class BugReport extends AdbCommandBase {
-    static VERSION_REGEX = /(\d+)\.(\d+)/;
+    static VERSION_REGEX: RegExp = /(\d+)\.(\d+)/;
 
-    static BEGIN_REGEX = /BEGIN:(.*)/;
+    static BEGIN_REGEX: RegExp = /BEGIN:(.*)/;
 
-    static PROGRESS_REGEX = /PROGRESS:(.*)\/(.*)/;
+    static PROGRESS_REGEX: RegExp = /PROGRESS:(.*)\/(.*)/;
 
-    static OK_REGEX = /OK:(.*)/;
+    static OK_REGEX: RegExp = /OK:(.*)/;
 
-    static FAIL_REGEX = /FAIL:(.*)/;
+    static FAIL_REGEX: RegExp = /FAIL:(.*)/;
 
     /**
      * Queries the device's bugreport capabilities.
@@ -101,7 +101,7 @@ export class BugReport extends AdbCommandBase {
      *
      * Should be `true` for Android version <= 11.
      */
-    get supportsBugReport() {
+    get supportsBugReport(): boolean {
         return this.#supportsBugReport;
     }
 
@@ -111,7 +111,7 @@ export class BugReport extends AdbCommandBase {
      *
      * Will be `undefined` if BugReportZ is not supported.
      */
-    get bugReportZVersion() {
+    get bugReportZVersion(): string | undefined {
         return this.#bugReportZVersion;
     }
 
@@ -121,7 +121,7 @@ export class BugReport extends AdbCommandBase {
      *
      * Should be `true` for Android version >= 7.
      */
-    get supportsBugReportZ() {
+    get supportsBugReportZ(): boolean {
         return this.#supportsBugReportZ;
     }
 
@@ -131,7 +131,7 @@ export class BugReport extends AdbCommandBase {
      *
      * Should be `true` for Android version >= 8.
      */
-    get supportsBugReportZProgress() {
+    get supportsBugReportZProgress(): boolean {
         return this.#supportsBugReportZProgress;
     }
 
@@ -141,7 +141,7 @@ export class BugReport extends AdbCommandBase {
      *
      * Should be `true` for Android version >= 12.
      */
-    get supportsBugReportZStream() {
+    get supportsBugReportZStream(): boolean {
         return this.#supportsBugReportZStream;
     }
 
@@ -185,7 +185,7 @@ export class BugReport extends AdbCommandBase {
      */
     async bugReportZ(options?: BugReportZOptions): Promise<string> {
         if (options?.signal?.aborted) {
-            throw options?.signal.reason ?? new Error("Aborted");
+            throw options?.signal.reason as Error;
         }
 
         if (!this.#supportsBugReportZ) {
@@ -211,37 +211,33 @@ export class BugReport extends AdbCommandBase {
         let filename: string | undefined;
         let error: string | undefined;
 
-        await process.stdout
-            .pipeThrough(new DecodeUtf8Stream())
-            .pipeThrough(new SplitStringStream("\n"))
-            .pipeTo(
-                new WritableStream<string>({
-                    write(line) {
-                        // `BEGIN:` and `PROGRESS:` only appear when `-p` is specified.
-                        let match = line.match(BugReport.PROGRESS_REGEX);
-                        if (match) {
-                            options?.onProgress?.(match[1]!, match[2]!);
-                        }
+        for await (const line of process.stdout
+            .pipeThrough(new TextDecoderStream())
+            // Each chunk should contain one or several full lines
+            .pipeThrough(new SplitStringStream("\n"))) {
+            // `BEGIN:` and `PROGRESS:` only appear when `-p` is specified.
+            let match = line.match(BugReport.PROGRESS_REGEX);
+            if (match) {
+                options?.onProgress?.(match[1]!, match[2]!);
+            }
 
-                        match = line.match(BugReport.BEGIN_REGEX);
-                        if (match) {
-                            filename = match[1]!;
-                        }
+            match = line.match(BugReport.BEGIN_REGEX);
+            if (match) {
+                filename = match[1]!;
+            }
 
-                        match = line.match(BugReport.OK_REGEX);
-                        if (match) {
-                            filename = match[1];
-                        }
+            match = line.match(BugReport.OK_REGEX);
+            if (match) {
+                filename = match[1];
+            }
 
-                        match = line.match(BugReport.FAIL_REGEX);
-                        if (match) {
-                            // Don't report error now
-                            // We want to gather all output.
-                            error = match[1];
-                        }
-                    },
-                }),
-            );
+            match = line.match(BugReport.FAIL_REGEX);
+            if (match) {
+                // Don't report error now
+                // We want to gather all output.
+                error = match[1];
+            }
+        }
 
         if (error) {
             throw new Error(error);
@@ -278,7 +274,7 @@ export class BugReport extends AdbCommandBase {
                     controller.error(e);
                 });
             process.stderr
-                .pipeThrough(new DecodeUtf8Stream())
+                .pipeThrough(new TextDecoderStream())
                 .pipeTo(
                     new WritableStream({
                         write(chunk) {

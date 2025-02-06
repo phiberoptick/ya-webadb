@@ -1,19 +1,15 @@
 import { PromiseResolver } from "@yume-chan/async";
 import type { Disposable } from "@yume-chan/event";
 import type {
-    Consumable,
     PushReadableStreamController,
     ReadableStream,
     WritableStream,
     WritableStreamDefaultController,
 } from "@yume-chan/stream-extra";
-import {
-    ConsumableWritableStream,
-    PushReadableStream,
-} from "@yume-chan/stream-extra";
+import { MaybeConsumable, PushReadableStream } from "@yume-chan/stream-extra";
+import { EmptyUint8Array } from "@yume-chan/struct";
 
 import type { AdbSocket } from "../adb.js";
-import { raceSignal } from "../server/index.js";
 
 import type { AdbPacketDispatcher } from "./dispatcher.js";
 import { AdbCommand } from "./packet.js";
@@ -26,11 +22,15 @@ export interface AdbDaemonSocketInfo {
     service: string;
 }
 
-export interface AdbDaemonSocketConstructionOptions
-    extends AdbDaemonSocketInfo {
+export interface AdbDaemonSocketInit extends AdbDaemonSocketInfo {
     dispatcher: AdbPacketDispatcher;
 
     highWaterMark?: number | undefined;
+
+    /**
+     * The initial delayed ack byte count, or `Infinity` if delayed ack is disabled.
+     */
+    availableWriteBytes: number;
 }
 
 export class AdbDaemonSocketController
@@ -49,9 +49,8 @@ export class AdbDaemonSocketController
         return this.#readable;
     }
 
-    #writePromise: PromiseResolver<void> | undefined;
     #writableController!: WritableStreamDefaultController;
-    readonly writable: WritableStream<Consumable<Uint8Array>>;
+    readonly writable: WritableStream<MaybeConsumable<Uint8Array>>;
 
     #closed = false;
 
@@ -65,7 +64,18 @@ export class AdbDaemonSocketController
         return this.#socket;
     }
 
-    constructor(options: AdbDaemonSocketConstructionOptions) {
+    #availableWriteBytesChanged: PromiseResolver<void> | undefined;
+    /**
+     * When delayed ack is disabled, returns `Infinity` if the socket is ready to write
+     * (exactly one packet can be written no matter how large it is), or `-1` if the socket
+     * is waiting for ack message.
+     *
+     * When delayed ack is enabled, returns a non-negative finite number indicates the number of
+     * bytes that can be written to the socket before waiting for ack message.
+     */
+    #availableWriteBytes = 0;
+
+    constructor(options: AdbDaemonSocketInit) {
         this.#dispatcher = options.dispatcher;
         this.localId = options.localId;
         this.remoteId = options.remoteId;
@@ -76,11 +86,16 @@ export class AdbDaemonSocketController
             this.#readableController = controller;
         });
 
-        this.writable = new ConsumableWritableStream<Uint8Array>({
+        this.writable = new MaybeConsumable.WritableStream<Uint8Array>({
             start: (controller) => {
                 this.#writableController = controller;
+                controller.signal.addEventListener("abort", () => {
+                    this.#availableWriteBytesChanged?.reject(
+                        controller.signal.reason,
+                    );
+                });
             },
-            write: async (data, controller) => {
+            write: async (data) => {
                 const size = data.length;
                 const chunkSize = this.#dispatcher.options.maxPayloadSize;
                 for (
@@ -88,44 +103,47 @@ export class AdbDaemonSocketController
                     start < size;
                     start = end, end += chunkSize
                 ) {
-                    this.#writePromise = new PromiseResolver();
-                    await this.#dispatcher.sendPacket(
-                        AdbCommand.Write,
-                        this.localId,
-                        this.remoteId,
-                        data.subarray(start, end),
-                    );
-                    // Wait for ack packet
-                    await raceSignal(
-                        () => this.#writePromise!.promise,
-                        controller.signal,
-                    );
+                    const chunk = data.subarray(start, end);
+                    await this.#writeChunk(chunk);
                 }
             },
         });
 
         this.#socket = new AdbDaemonSocket(this);
+        this.#availableWriteBytes = options.availableWriteBytes;
+    }
+
+    async #writeChunk(data: Uint8Array) {
+        const length = data.length;
+        while (this.#availableWriteBytes < length) {
+            // Only one lock is required because Web Streams API guarantees
+            // that `write` is not reentrant.
+            const resolver = new PromiseResolver<void>();
+            this.#availableWriteBytesChanged = resolver;
+            await resolver.promise;
+        }
+
+        if (this.#availableWriteBytes === Infinity) {
+            this.#availableWriteBytes = -1;
+        } else {
+            this.#availableWriteBytes -= length;
+        }
+
+        await this.#dispatcher.sendPacket(
+            AdbCommand.Write,
+            this.localId,
+            this.remoteId,
+            data,
+        );
     }
 
     async enqueue(data: Uint8Array) {
-        // Consumers can `cancel` the `readable` if they are not interested in future data.
-        // Throw away the data if that happens.
-        if (this.#readableController.abortSignal.aborted) {
-            return;
-        }
-
-        try {
-            await this.#readableController.enqueue(data);
-        } catch (e) {
-            if (this.#readableController.abortSignal.aborted) {
-                return;
-            }
-            throw e;
-        }
+        await this.#readableController.enqueue(data);
     }
 
-    ack() {
-        this.#writePromise?.resolve();
+    public ack(bytes: number) {
+        this.#availableWriteBytes += bytes;
+        this.#availableWriteBytesChanged?.resolve();
     }
 
     async close(): Promise<void> {
@@ -133,6 +151,8 @@ export class AdbDaemonSocketController
             return;
         }
         this.#closed = true;
+
+        this.#availableWriteBytesChanged?.reject(new Error("Socket closed"));
 
         try {
             this.#writableController.error(new Error("Socket closed"));
@@ -144,27 +164,18 @@ export class AdbDaemonSocketController
             AdbCommand.Close,
             this.localId,
             this.remoteId,
+            EmptyUint8Array,
         );
     }
 
     dispose() {
-        try {
-            this.#readableController.close();
-        } catch {
-            // ignore
-        }
-
+        this.#readableController.close();
         this.#closedPromise.resolve();
     }
 }
 
 /**
  * A duplex stream representing a socket to ADB daemon.
- *
- * To close it, call either `socket.close()`,
- * `socket.readable.cancel()`, `socket.readable.getReader().cancel()`,
- * `socket.writable.abort()`, `socket.writable.getWriter().abort()`,
- * `socket.writable.close()` or `socket.writable.getWriter().close()`.
  */
 export class AdbDaemonSocket implements AdbDaemonSocketInfo, AdbSocket {
     #controller: AdbDaemonSocketController;
@@ -185,7 +196,7 @@ export class AdbDaemonSocket implements AdbDaemonSocketInfo, AdbSocket {
     get readable(): ReadableStream<Uint8Array> {
         return this.#controller.readable;
     }
-    get writable(): WritableStream<Consumable<Uint8Array>> {
+    get writable(): WritableStream<MaybeConsumable<Uint8Array>> {
         return this.#controller.writable;
     }
 

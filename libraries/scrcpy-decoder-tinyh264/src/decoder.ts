@@ -7,8 +7,8 @@ import {
     h264ParseConfiguration,
 } from "@yume-chan/scrcpy";
 import { WritableStream } from "@yume-chan/stream-extra";
-import type { default as YuvBuffer } from "yuv-buffer";
-import type { default as YuvCanvas } from "yuv-canvas";
+import YuvBuffer from "yuv-buffer";
+import YuvCanvas from "yuv-canvas";
 
 import type {
     ScrcpyVideoDecoder,
@@ -17,25 +17,18 @@ import type {
 import type { TinyH264Wrapper } from "./wrapper.js";
 import { createTinyH264Wrapper } from "./wrapper.js";
 
-const NOOP = () => {
+const noop = () => {
     // no-op
 };
 
-let cachedInitializePromise:
-    | Promise<{ YuvBuffer: typeof YuvBuffer; YuvCanvas: typeof YuvCanvas }>
-    | undefined;
-function initialize() {
-    if (!cachedInitializePromise) {
-        cachedInitializePromise = Promise.all([
-            import("yuv-buffer"),
-            import("yuv-canvas"),
-        ]).then(([YuvBuffer, { default: YuvCanvas }]) => ({
-            YuvBuffer,
-            YuvCanvas,
-        }));
+export function createCanvas() {
+    if (typeof document !== "undefined") {
+        return document.createElement("canvas");
     }
-
-    return cachedInitializePromise;
+    if (typeof OffscreenCanvas !== "undefined") {
+        return new OffscreenCanvas(1, 1);
+    }
+    throw new Error("no canvas input found nor any canvas can be created");
 }
 
 export class TinyH264Decoder implements ScrcpyVideoDecoder {
@@ -47,7 +40,7 @@ export class TinyH264Decoder implements ScrcpyVideoDecoder {
             },
         };
 
-    #renderer: HTMLCanvasElement;
+    #renderer: HTMLCanvasElement | OffscreenCanvas;
     get renderer() {
         return this.#renderer;
     }
@@ -58,12 +51,12 @@ export class TinyH264Decoder implements ScrcpyVideoDecoder {
     }
 
     #frameRendered = 0;
-    get frameRendered() {
+    get framesRendered() {
         return this.#frameRendered;
     }
 
     #frameSkipped = 0;
-    get frameSkipped() {
+    get framesSkipped() {
         return this.#frameSkipped;
     }
 
@@ -75,10 +68,12 @@ export class TinyH264Decoder implements ScrcpyVideoDecoder {
     #yuvCanvas: YuvCanvas | undefined;
     #initializer: PromiseResolver<TinyH264Wrapper> | undefined;
 
-    constructor() {
-        void initialize();
-
-        this.#renderer = document.createElement("canvas");
+    constructor({ canvas }: TinyH264Decoder.Options = {}) {
+        if (canvas) {
+            this.#renderer = canvas;
+        } else {
+            this.#renderer = createCanvas();
+        }
 
         this.#writable = new WritableStream<ScrcpyMediaStreamPacket>({
             write: async (packet) => {
@@ -104,10 +99,21 @@ export class TinyH264Decoder implements ScrcpyVideoDecoder {
         this.dispose();
 
         this.#initializer = new PromiseResolver<TinyH264Wrapper>();
-        const { YuvBuffer, YuvCanvas } = await initialize();
-
         if (!this.#yuvCanvas) {
-            this.#yuvCanvas = YuvCanvas.attach(this.#renderer);
+            // yuv-canvas detects WebGL support by creating a <canvas> itself
+            // not working in worker
+            const canvas = createCanvas();
+            const attributes: WebGLContextAttributes = {
+                // Disallow software rendering.
+                // Other rendering methods are faster than software-based WebGL.
+                failIfMajorPerformanceCaveat: true,
+            };
+            const gl =
+                canvas.getContext("webgl2", attributes) ||
+                canvas.getContext("webgl", attributes);
+            this.#yuvCanvas = YuvCanvas.attach(this.#renderer, {
+                webGL: !!gl,
+            });
         }
 
         const {
@@ -165,7 +171,18 @@ export class TinyH264Decoder implements ScrcpyVideoDecoder {
         this.#initializer?.promise
             .then((wrapper) => wrapper.dispose())
             // NOOP: It's disposed so nobody cares about the error
-            .catch(NOOP);
+            .catch(noop);
         this.#initializer = undefined;
+    }
+}
+
+export namespace TinyH264Decoder {
+    export interface Options {
+        /**
+         * Optional render target canvas element or offscreen canvas.
+         * If not provided, a new `<canvas>` (when DOM is available)
+         * or a `OffscreenCanvas` will be created.
+         */
+        canvas?: HTMLCanvasElement | OffscreenCanvas | undefined;
     }
 }

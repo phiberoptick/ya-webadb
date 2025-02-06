@@ -1,11 +1,11 @@
+import type { MaybePromiseLike } from "@yume-chan/async";
 import { PromiseResolver } from "@yume-chan/async";
-import type { Consumable, ReadableWritablePair } from "@yume-chan/stream-extra";
+import type { ReadableWritablePair } from "@yume-chan/stream-extra";
 import {
     AbortController,
-    ConsumableWritableStream,
+    Consumable,
     WritableStream,
 } from "@yume-chan/stream-extra";
-import type { ValueOrPromise } from "@yume-chan/struct";
 import { decodeUtf8, encodeUtf8 } from "@yume-chan/struct";
 
 import type {
@@ -26,22 +26,83 @@ import type { AdbPacketData, AdbPacketInit } from "./packet.js";
 import { AdbCommand, calculateChecksum } from "./packet.js";
 
 export const ADB_DAEMON_VERSION_OMIT_CHECKSUM = 0x01000001;
+// https://android.googlesource.com/platform/packages/modules/adb/+/79010dc6d5ca7490c493df800d4421730f5466ca/transport.cpp#1252
+// There are some other feature constants, but some of them are only used by ADB server, not devices (daemons).
+export const ADB_DAEMON_DEFAULT_FEATURES = /* #__PURE__ */ (() =>
+    [
+        AdbFeature.ShellV2,
+        AdbFeature.Cmd,
+        AdbFeature.StatV2,
+        AdbFeature.ListV2,
+        AdbFeature.FixedPushMkdir,
+        "apex",
+        AdbFeature.Abb,
+        // only tells the client the symlink timestamp issue in `adb push --sync` has been fixed.
+        // No special handling required.
+        "fixed_push_symlink_timestamp",
+        AdbFeature.AbbExec,
+        "remount_shell",
+        "track_app",
+        AdbFeature.SendReceiveV2,
+        "sendrecv_v2_brotli",
+        "sendrecv_v2_lz4",
+        "sendrecv_v2_zstd",
+        "sendrecv_v2_dry_run_send",
+        AdbFeature.DelayedAck,
+    ] as AdbFeature[])();
+export const ADB_DAEMON_DEFAULT_INITIAL_PAYLOAD_SIZE = 32 * 1024 * 1024;
 
 export type AdbDaemonConnection = ReadableWritablePair<
     AdbPacketData,
     Consumable<AdbPacketInit>
 >;
 
-interface AdbDaemonAuthenticationOptions {
+export interface AdbDaemonAuthenticationOptions {
     serial: string;
     connection: AdbDaemonConnection;
     credentialStore: AdbCredentialStore;
     authenticators?: AdbAuthenticator[];
+    features?: readonly AdbFeature[];
+
     /**
-     * Whether to preserve the connection open after the `AdbDaemonTransport` is closed.
+     * The number of bytes the device can send before receiving an ack packet.
+     * Using delayed ack can improve the throughput,
+     * especially when the device is connected over Wi-Fi (so the latency is higher).
+     *
+     * Set to 0 or any negative value to disable delayed ack in handshake.
+     * Otherwise the value must be in the range of unsigned 32-bit integer.
+     *
+     * Delayed ack was added in Android 14,
+     * this option will be ignored when the device doesn't support it.
+     *
+     * @default ADB_DAEMON_DEFAULT_INITIAL_PAYLOAD_SIZE
+     */
+    initialDelayedAckBytes?: number;
+
+    /**
+     * Whether to keep the `connection` open (don't call `writable.close` and `readable.cancel`)
+     * when `AdbDaemonTransport.close` is called.
+     *
+     * Note that when `authenticate` fails,
+     * no matter which value this option has,
+     * the `connection` is always kept open, so it can be used in another `authenticate` call.
+     *
+     * @default false
      */
     preserveConnection?: boolean | undefined;
-    debugSlowRead?: boolean | undefined;
+
+    /**
+     * When set, the transport will throw an error when
+     * one of the socket readable stalls for this amount of milliseconds.
+     *
+     * Because ADB is a multiplexed protocol, blocking one socket will also block all other sockets.
+     * It's important to always read from all sockets to prevent stalling.
+     *
+     * This option is helpful to detect bugs in the client code.
+     *
+     * @default undefined
+     */
+    readTimeLimit?: number | undefined;
 }
 
 interface AdbDaemonSocketConnectorConstructionOptions {
@@ -50,27 +111,58 @@ interface AdbDaemonSocketConnectorConstructionOptions {
     version: number;
     maxPayloadSize: number;
     banner: string;
+    features?: readonly AdbFeature[];
+
     /**
-     * Whether to preserve the connection open after the `AdbDaemonTransport` is closed.
+     * The number of bytes the device can send before receiving an ack packet.
+     *
+     * On Android 14 and newer, the Delayed Acknowledgement feature is added to
+     * improve performance, especially for high-latency connections like ADB over Wi-Fi.
+     *
+     * When `features` doesn't include `AdbFeature.DelayedAck`, it must be set to 0. Otherwise,
+     * the value must be in the range of unsigned 32-bit integer.
+     *
+     * If the device enabled delayed ack but the client didn't, the device will throw an error
+     * when the client sends the first data packet. And vice versa.
+     */
+    initialDelayedAckBytes: number;
+
+    /**
+     * Whether to keep the `connection` open (don't call `writable.close` and `readable.cancel`)
+     * when `AdbDaemonTransport.close` is called.
+     *
+     * @default false
      */
     preserveConnection?: boolean | undefined;
-    debugSlowRead?: boolean | undefined;
+
+    /**
+     * When set, the transport will throw an error when
+     * one of the socket readable stalls for this amount of milliseconds.
+     *
+     * Because ADB is a multiplexed protocol, blocking one socket will also block all other sockets.
+     * It's important to always read from all sockets to prevent stalling.
+     *
+     * This option is helpful to detect bugs in the client code.
+     *
+     * @default undefined
+     */
+    readTimeLimit?: number | undefined;
 }
 
+/**
+ * An ADB Transport that connects to ADB Daemons directly.
+ */
 export class AdbDaemonTransport implements AdbTransport {
     /**
-     * Authenticates the connection and creates an `AdbDaemonTransport` instance
-     * that can be used by `Adb` class.
-     *
-     * If an authentication process failed, it's possible to call `authenticate` again
-     * on the same connection. Because every time the device receives a `CNXN` packet,
-     * it resets all internal state, and starts a new authentication process.
+     * Authenticate with the ADB Daemon and create a new transport.
      */
     static async authenticate({
         serial,
         connection,
         credentialStore,
         authenticators = ADB_DEFAULT_AUTHENTICATORS,
+        features = ADB_DAEMON_DEFAULT_FEATURES,
+        initialDelayedAckBytes = ADB_DAEMON_DEFAULT_INITIAL_PAYLOAD_SIZE,
         ...options
     }: AdbDaemonAuthenticationOptions): Promise<AdbDaemonTransport> {
         // Initially, set to highest-supported version and payload size.
@@ -124,11 +216,10 @@ export class AdbDaemonTransport implements AdbTransport {
             )
             .then(
                 () => {
-                    if (resolver.state === "running") {
-                        resolver.reject(
-                            new Error("Connection closed unexpectedly"),
-                        );
-                    }
+                    // If `resolver` is already settled, call `reject` won't do anything.
+                    resolver.reject(
+                        new Error("Connection closed unexpectedly"),
+                    );
                 },
                 (e) => {
                     resolver.reject(e);
@@ -141,41 +232,31 @@ export class AdbDaemonTransport implements AdbTransport {
             // Because we don't know if the device needs it or not.
             (init as AdbPacketInit).checksum = calculateChecksum(init.payload);
             (init as AdbPacketInit).magic = init.command ^ 0xffffffff;
-            await ConsumableWritableStream.write(writer, init as AdbPacketInit);
+            await Consumable.WritableStream.write(
+                writer,
+                init as AdbPacketInit,
+            );
+        }
+
+        const actualFeatures = features.slice();
+        if (initialDelayedAckBytes <= 0) {
+            const index = features.indexOf(AdbFeature.DelayedAck);
+            if (index !== -1) {
+                actualFeatures.splice(index, 1);
+            }
         }
 
         let banner: string;
         try {
-            // https://android.googlesource.com/platform/packages/modules/adb/+/79010dc6d5ca7490c493df800d4421730f5466ca/transport.cpp#1252
-            // There are some other feature constants, but some of them are only used by ADB server, not devices (daemons).
-            const features = [
-                AdbFeature.ShellV2,
-                AdbFeature.Cmd,
-                AdbFeature.StatV2,
-                AdbFeature.ListV2,
-                AdbFeature.FixedPushMkdir,
-                "apex",
-                AdbFeature.Abb,
-                // only tells the client the symlink timestamp issue in `adb push --sync` has been fixed.
-                // No special handling required.
-                "fixed_push_symlink_timestamp",
-                AdbFeature.AbbExec,
-                "remount_shell",
-                "track_app",
-                AdbFeature.SendReceiveV2,
-                "sendrecv_v2_brotli",
-                "sendrecv_v2_lz4",
-                "sendrecv_v2_zstd",
-                "sendrecv_v2_dry_run_send",
-            ].join(",");
-
             await sendPacket({
                 command: AdbCommand.Connect,
                 arg0: version,
                 arg1: maxPayloadSize,
                 // The terminating `;` is required in formal definition
                 // But ADB daemon (all versions) can still work without it
-                payload: encodeUtf8(`host::features=${features}`),
+                payload: encodeUtf8(
+                    `host::features=${actualFeatures.join(",")}`,
+                ),
             });
 
             banner = await resolver.promise;
@@ -195,6 +276,8 @@ export class AdbDaemonTransport implements AdbTransport {
             version,
             maxPayloadSize,
             banner,
+            features: actualFeatures,
+            initialDelayedAckBytes,
             ...options,
         });
     }
@@ -229,16 +312,38 @@ export class AdbDaemonTransport implements AdbTransport {
         return this.#dispatcher.disconnected;
     }
 
+    #clientFeatures: readonly AdbFeature[];
+    get clientFeatures() {
+        return this.#clientFeatures;
+    }
+
     constructor({
         serial,
         connection,
         version,
         banner,
+        features = ADB_DAEMON_DEFAULT_FEATURES,
+        initialDelayedAckBytes,
         ...options
     }: AdbDaemonSocketConnectorConstructionOptions) {
         this.#serial = serial;
         this.#connection = connection;
         this.#banner = AdbBanner.parse(banner);
+        this.#clientFeatures = features;
+
+        if (features.includes(AdbFeature.DelayedAck)) {
+            if (initialDelayedAckBytes <= 0) {
+                throw new TypeError(
+                    "`initialDelayedAckBytes` must be greater than 0 when DelayedAck feature is enabled.",
+                );
+            }
+
+            if (!this.#banner.features.includes(AdbFeature.DelayedAck)) {
+                initialDelayedAckBytes = 0;
+            }
+        } else {
+            initialDelayedAckBytes = 0;
+        }
 
         let calculateChecksum: boolean;
         let appendNullToServiceString: boolean;
@@ -253,13 +358,14 @@ export class AdbDaemonTransport implements AdbTransport {
         this.#dispatcher = new AdbPacketDispatcher(connection, {
             calculateChecksum,
             appendNullToServiceString,
+            initialDelayedAckBytes,
             ...options,
         });
 
         this.#protocolVersion = version;
     }
 
-    connect(service: string): ValueOrPromise<AdbSocket> {
+    connect(service: string): MaybePromiseLike<AdbSocket> {
         return this.#dispatcher.createSocket(service);
     }
 
@@ -283,7 +389,7 @@ export class AdbDaemonTransport implements AdbTransport {
         this.#dispatcher.clearReverseTunnels();
     }
 
-    close(): ValueOrPromise<void> {
+    close(): MaybePromiseLike<void> {
         return this.#dispatcher.close();
     }
 }

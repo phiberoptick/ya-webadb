@@ -1,6 +1,6 @@
 {
     "name": "@yume-chan/pcm-player",
-    "version": "0.0.22",
+    "version": "1.0.0",
     "description": "Play raw audio sample stream using Web Audio API",
     "keywords": [
         "audio"
@@ -23,26 +23,17 @@
     "type": "module",
     "main": "esm/index.js",
     "types": "esm/index.d.ts",
+    "sideEffects": false,
     "scripts": {
         "build": "tsc -b tsconfig.dom.json && tsc -b tsconfig.worker.json",
-        "build:watch": "tsc -b tsconfig.dom.json && tsc -b tsconfig.worker.json",
-        "//test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --coverage",
-        "lint": "eslint src/**/*.ts --fix && prettier src/**/*.ts --write --tab-width 4",
+        "lint": "run-eslint && prettier src/**/*.ts --write --tab-width 4",
         "prepublishOnly": "npm run build"
     },
-    "dependencies": {
-        "tslib": "^2.6.2"
-    },
     "devDependencies": {
-        "@jest/globals": "^30.0.0-alpha.2",
-        "@types/audioworklet": "^0.0.53",
-        "@yume-chan/eslint-config": "workspace:^1.0.0",
-        "@yume-chan/tsconfig": "workspace:^1.0.0",
-        "cross-env": "^7.0.3",
-        "eslint": "^8.56.0",
-        "jest": "^30.0.0-alpha.2",
-        "prettier": "^3.2.4",
-        "ts-jest": "^29.1.1",
-        "typescript": "^5.3.3"
+        "@types/audioworklet": "^0.0.67",
+        "@yume-chan/eslint-config": "workspace:^",
+        "@yume-chan/tsconfig": "workspace:^",
+        "prettier": "^3.4.2",
+        "typescript": "^5.7.3"
     }
 }

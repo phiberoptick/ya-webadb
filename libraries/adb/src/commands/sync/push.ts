@@ -1,10 +1,10 @@
-import type { Consumable, ReadableStream } from "@yume-chan/stream-extra";
+import type { ReadableStream } from "@yume-chan/stream-extra";
 import {
     AbortController,
-    ConsumableWritableStream,
     DistributionStream,
+    MaybeConsumable,
 } from "@yume-chan/stream-extra";
-import Struct, { placeholder } from "@yume-chan/struct";
+import { struct, u32 } from "@yume-chan/struct";
 
 import { NOOP } from "../../utils/index.js";
 
@@ -18,20 +18,21 @@ export const ADB_SYNC_MAX_PACKET_SIZE = 64 * 1024;
 export interface AdbSyncPushV1Options {
     socket: AdbSyncSocket;
     filename: string;
-    file: ReadableStream<Consumable<Uint8Array>>;
+    file: ReadableStream<MaybeConsumable<Uint8Array>>;
     type?: LinuxFileType;
     permission?: number;
     mtime?: number;
     packetSize?: number;
 }
 
-export const AdbSyncOkResponse = new Struct({ littleEndian: true }).uint32(
-    "unused",
+export const AdbSyncOkResponse = struct(
+    { unused: u32 },
+    { littleEndian: true },
 );
 
 async function pipeFileData(
     locked: AdbSyncSocketLocked,
-    file: ReadableStream<Consumable<Uint8Array>>,
+    file: ReadableStream<MaybeConsumable<Uint8Array>>,
     packetSize: number,
     mtime: number,
 ) {
@@ -40,9 +41,9 @@ async function pipeFileData(
     const abortController = new AbortController();
     file.pipeThrough(new DistributionStream(packetSize, true))
         .pipeTo(
-            new ConsumableWritableStream({
-                write: async (chunk) => {
-                    await adbSyncWriteRequest(
+            new MaybeConsumable.WritableStream({
+                write(chunk) {
+                    return adbSyncWriteRequest(
                         locked,
                         AdbSyncRequestId.Data,
                         chunk,
@@ -86,22 +87,22 @@ export async function adbSyncPushV1({
     }
 }
 
-export enum AdbSyncSendV2Flags {
-    None = 0,
-    Brotli = 1,
+export const AdbSyncSendV2Flags = {
+    None: 0,
+    Brotli: 1,
     /**
      * 2
      */
-    Lz4 = 1 << 1,
+    Lz4: 1 << 1,
     /**
      * 4
      */
-    Zstd = 1 << 2,
-    /**
-     * 0x80000000
-     */
-    DryRun = (1 << 31) >>> 0,
-}
+    Zstd: 1 << 2,
+    DryRun: 0x80000000,
+} as const;
+
+export type AdbSyncSendV2Flags =
+    (typeof AdbSyncSendV2Flags)[keyof typeof AdbSyncSendV2Flags];
 
 export interface AdbSyncPushV2Options extends AdbSyncPushV1Options {
     /**
@@ -113,10 +114,10 @@ export interface AdbSyncPushV2Options extends AdbSyncPushV1Options {
     dryRun?: boolean;
 }
 
-export const AdbSyncSendV2Request = new Struct({ littleEndian: true })
-    .uint32("id", placeholder<AdbSyncRequestId>())
-    .uint32("mode")
-    .uint32("flags", placeholder<AdbSyncSendV2Flags>());
+export const AdbSyncSendV2Request = struct(
+    { id: u32, mode: u32, flags: u32<AdbSyncSendV2Flags>() },
+    { littleEndian: true },
+);
 
 export async function adbSyncPushV2({
     socket,

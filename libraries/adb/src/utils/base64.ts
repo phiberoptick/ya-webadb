@@ -1,23 +1,31 @@
-// Array is faster than object literal or `Map`
-const charToIndex: number[] = [];
-const indexToChar: number[] = [];
-const paddingChar = "=".charCodeAt(0);
+const [charToIndex, indexToChar, paddingChar] = /* #__PURE__ */ (() => {
+    // Array is faster than object literal or `Map`
+    const charToIndex: number[] = [];
+    const indexToChar: number[] = [];
+    const paddingChar = "=".charCodeAt(0);
 
-function addRange(start: string, end: string) {
-    const charCodeStart = start.charCodeAt(0);
-    const charCodeEnd = end.charCodeAt(0);
+    function addRange(start: string, end: string) {
+        const charCodeStart = start.charCodeAt(0);
+        const charCodeEnd = end.charCodeAt(0);
 
-    for (let charCode = charCodeStart; charCode <= charCodeEnd; charCode += 1) {
-        charToIndex[charCode] = indexToChar.length;
-        indexToChar.push(charCode);
+        for (
+            let charCode = charCodeStart;
+            charCode <= charCodeEnd;
+            charCode += 1
+        ) {
+            charToIndex[charCode] = indexToChar.length;
+            indexToChar.push(charCode);
+        }
     }
-}
 
-addRange("A", "Z");
-addRange("a", "z");
-addRange("0", "9");
-addRange("+", "+");
-addRange("/", "/");
+    addRange("A", "Z");
+    addRange("a", "z");
+    addRange("0", "9");
+    addRange("+", "+");
+    addRange("/", "/");
+
+    return [charToIndex, indexToChar, paddingChar];
+})();
 
 /**
  * Calculate the required length of the output buffer for the given input length.
@@ -66,7 +74,7 @@ export function encodeBase64(
         return output;
     } else {
         if (output.length < outputLength) {
-            throw new Error("output buffer is too small");
+            throw new TypeError("output buffer is too small");
         }
 
         output = output.subarray(0, outputLength);
@@ -79,41 +87,52 @@ export function encodeBase64(
             output.byteOffset + output.length - (paddingLength + 1) <=
             input.byteOffset + input.length
         ) {
-            // Output ends before input ends
-            // So output won't catch up with input.
+            // Output ends before input ends.
+            // Can encode forwards, because writing output won't catch up with reading input.
 
-            // Depends on padding length,
-            // it's possible to write 1-3 bytes after input ends.
-            // spell: disable-next-line
-            // | aaaaaabb |          |          |          |
-            // |  aaaaaa  |  bb0000  |    =     |    =     |
+            // The output end is subtracted by `(paddingLength + 1)` because
+            // depending on padding length, it's possible to write 1-3 extra bytes after input ends.
             //
-            // spell: disable-next-line
-            // | aaaaaabb | bbbbcccc |          |          |
-            // |  aaaaaa  |  bbbbbb  |  cccc00  |    =     |
+            // The following diagrams show how the last read from input and the last write to output
+            // are not conflicting.
             //
-            // spell: disable-next-line
-            // | aaaaaabb | bbbbcccc | ccdddddd |          |
-            // |  aaaaaa  |  bbbbbb  |  cccccc  |  dddddd  |
+            // spell: disable
+            //
+            // `paddingLength === 2` can write 3 extra bytes:
+            //
+            //   input:  | aaaaaabb |          |          |          |
+            //   output: |  aaaaaa  |  bb0000  |    =     |    =     |
+            //
+            // `paddingLength === 1` can write 2 extra bytes:
+            //
+            //   input:  | aaaaaabb | bbbbcccc |          |          |
+            //   output: |  aaaaaa  |  bbbbbb  |  cccc00  |    =     |
+            //
+            // `paddingLength === 0` can write 1 extra byte:
+            //
+            //   input:  | aaaaaabb | bbbbcccc | ccdddddd |          |
+            //   output: |  aaaaaa  |  bbbbbb  |  cccccc  |  dddddd  |
+            //
+            // spell: enable
 
-            // Must encode forwards.
             encodeForward(input, output, paddingLength);
         } else if (output.byteOffset >= input.byteOffset - 1) {
             // Output starts after input starts
-            // So in backwards, output can't catch up with input.
+            // So in backwards, writing output won't catch up with reading input.
 
-            // Because first 3 bytes becomes 4 bytes,
-            // it's possible to write 1 byte before input starts.
+            // The input start is subtracted by `1`, Because as the first 3 bytes becomes 4 bytes,
+            // it's possible to write 1 extra byte before input starts.
             // spell: disable-next-line
-            // |          | aaaaaabb | bbbbcccc | ccdddddd |
-            // |  aaaaaa  |  bbbbbb  |  cccccc  |  dddddd  |
+            //   input:  |          | aaaaaabb | bbbbcccc | ccdddddd |
+            //   output: |  aaaaaa  |  bbbbbb  |  cccccc  |  dddddd  |
 
             // Must encode backwards.
             encodeBackward(input, output, paddingLength);
         } else {
             // Input is in the middle of output,
-            // not possible to read neither first or last three bytes,
-            throw new Error("input and output cannot overlap");
+            // It's not possible to read either the first or the last three bytes
+            // before they are overwritten by the output.
+            throw new TypeError("input and output cannot overlap");
         }
 
         return outputLength;

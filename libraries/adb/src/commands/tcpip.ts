@@ -20,14 +20,14 @@ export interface AdbTcpIpListenAddresses {
     persistPort: number | undefined;
 }
 
-export class AdbTcpIpCommand extends AdbCommandBase {
-    #parsePort(value: string): number | undefined {
-        if (!value || value === "0") {
-            return undefined;
-        }
-        return Number.parseInt(value, 10);
+function parsePort(value: string): number | undefined {
+    if (!value || value === "0") {
+        return undefined;
     }
+    return Number.parseInt(value, 10);
+}
 
+export class AdbTcpIpCommand extends AdbCommandBase {
     async getListenAddresses(): Promise<AdbTcpIpListenAddresses> {
         const serviceListenAddresses = await this.adb.getProp(
             "service.adb.listen_addrs",
@@ -40,14 +40,14 @@ export class AdbTcpIpCommand extends AdbCommandBase {
                 serviceListenAddresses != ""
                     ? serviceListenAddresses.split(",")
                     : [],
-            servicePort: this.#parsePort(servicePort),
-            persistPort: this.#parsePort(persistPort),
+            servicePort: parsePort(servicePort),
+            persistPort: parsePort(persistPort),
         };
     }
 
     async setPort(port: number): Promise<string> {
         if (port <= 0) {
-            throw new Error(`Invalid port ${port}`);
+            throw new TypeError(`Invalid port ${port}`);
         }
 
         const output = await this.adb.createSocketAndWait(`tcpip:${port}`);

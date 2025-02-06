@@ -1,14 +1,13 @@
-import { ADB_DEFAULT_DEVICE_FILTER, AdbDaemonWebUsbDevice } from "./device.js";
-import type { AdbDeviceFilter } from "./utils.js";
 import {
-    findUsbAlternateInterface,
-    getSerialNumber,
-    isErrorName,
-} from "./utils.js";
+    AdbDaemonWebUsbDevice,
+    mergeDefaultAdbInterfaceFilter,
+} from "./device.js";
+import { AdbDaemonWebUsbDeviceObserver } from "./observer.js";
+import { isErrorName, matchFilters } from "./utils.js";
 
 export namespace AdbDaemonWebUsbDeviceManager {
     export interface RequestDeviceOptions {
-        filters?: AdbDeviceFilter[] | undefined;
+        filters?: USBDeviceFilter[] | undefined;
         exclusionFilters?: USBDeviceFilter[] | undefined;
     }
 }
@@ -36,34 +35,33 @@ export class AdbDaemonWebUsbDeviceManager {
     }
 
     /**
-     * Request access to a connected device.
-     * This is a convince method for `usb.requestDevice()`.
-     * @param filters
-     * The filters to apply to the device list.
-     *
-     * It must have `classCode`, `subclassCode` and `protocolCode` fields for selecting the ADB interface,
-     * but might also have `vendorId`, `productId` or `serialNumber` fields to limit the displayed device list.
-     *
-     * Defaults to {@link ADB_DEFAULT_DEVICE_FILTER}.
-     * @returns An {@link AdbDaemonWebUsbDevice} instance if the user selected a device,
-     * or `undefined` if the user cancelled the device picker.
+     * Call `USB#requestDevice()` to prompt the user to select a device.
      */
     async requestDevice(
         options: AdbDaemonWebUsbDeviceManager.RequestDeviceOptions = {},
     ): Promise<AdbDaemonWebUsbDevice | undefined> {
-        if (!options.filters) {
-            options.filters = [ADB_DEFAULT_DEVICE_FILTER];
-        } else if (options.filters.length === 0) {
-            throw new TypeError("filters must not be empty");
-        }
+        const filters = mergeDefaultAdbInterfaceFilter(options.filters);
 
         try {
-            const device = await this.#usbManager.requestDevice(
-                options as USBDeviceRequestOptions,
+            const device = await this.#usbManager.requestDevice({
+                filters,
+                exclusionFilters: options.exclusionFilters,
+            });
+
+            const interface_ = matchFilters(
+                device,
+                filters,
+                options.exclusionFilters,
             );
+            if (!interface_) {
+                // `#usbManager` doesn't support `exclusionFilters`,
+                // selected device is invalid
+                return undefined;
+            }
+
             return new AdbDaemonWebUsbDevice(
                 device,
-                options.filters,
+                interface_,
                 this.#usbManager,
             );
         } catch (e) {
@@ -77,63 +75,39 @@ export class AdbDaemonWebUsbDeviceManager {
     }
 
     /**
-     * Get all connected and authenticated devices.
-     * This is a convince method for `usb.getDevices()`.
-     * @param filters
-     * The filters to apply to the device list.
-     *
-     * It must have `classCode`, `subclassCode` and `protocolCode` fields for selecting the ADB interface,
-     * but might also have `vendorId`, `productId` or `serialNumber` fields to limit the device list.
-     *
-     * Defaults to {@link ADB_DEFAULT_DEVICE_FILTER}.
-     * @returns An array of {@link AdbDaemonWebUsbDevice} instances for all connected and authenticated devices.
+     * Get all connected and requested devices that match the specified filters.
      */
     async getDevices(
-        filters: AdbDeviceFilter[] = [ADB_DEFAULT_DEVICE_FILTER],
+        options: AdbDaemonWebUsbDeviceManager.RequestDeviceOptions = {},
     ): Promise<AdbDaemonWebUsbDevice[]> {
-        if (filters.length === 0) {
-            throw new TypeError("filters must not be empty");
-        }
+        const filters = mergeDefaultAdbInterfaceFilter(options.filters);
 
         const devices = await this.#usbManager.getDevices();
-        return devices
-            .filter((device) => {
-                for (const filter of filters) {
-                    if (
-                        "vendorId" in filter &&
-                        device.vendorId !== filter.vendorId
-                    ) {
-                        continue;
-                    }
-                    if (
-                        "productId" in filter &&
-                        device.productId !== filter.productId
-                    ) {
-                        continue;
-                    }
-                    if (
-                        "serialNumber" in filter &&
-                        getSerialNumber(device) !== filter.serialNumber
-                    ) {
-                        continue;
-                    }
-
-                    try {
-                        findUsbAlternateInterface(device, filters);
-                        return true;
-                    } catch {
-                        continue;
-                    }
-                }
-                return false;
-            })
-            .map(
-                (device) =>
+        // filter map
+        const result: AdbDaemonWebUsbDevice[] = [];
+        for (const device of devices) {
+            const interface_ = matchFilters(
+                device,
+                filters,
+                options.exclusionFilters,
+            );
+            if (interface_) {
+                result.push(
                     new AdbDaemonWebUsbDevice(
                         device,
-                        filters,
+                        interface_,
                         this.#usbManager,
                     ),
-            );
+                );
+            }
+        }
+
+        return result;
+    }
+
+    trackDevices(
+        options: AdbDaemonWebUsbDeviceManager.RequestDeviceOptions = {},
+    ): Promise<AdbDaemonWebUsbDeviceObserver> {
+        return AdbDaemonWebUsbDeviceObserver.create(this.#usbManager, options);
     }
 }

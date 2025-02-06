@@ -1,21 +1,17 @@
 import type { AddressInfo, SocketConnectOpts } from "net";
 import { Server, Socket } from "net";
 
-import type {
-    AdbIncomingSocketHandler,
-    AdbServerConnection,
-    AdbServerConnectionOptions,
-    AdbServerConnector,
-} from "@yume-chan/adb";
+import type { AdbIncomingSocketHandler, AdbServerClient } from "@yume-chan/adb";
+import type { MaybePromiseLike } from "@yume-chan/async";
 import {
+    MaybeConsumable,
     PushReadableStream,
-    UnwrapConsumableStream,
-    WrapWritableStream,
-    WritableStream,
+    tryClose,
 } from "@yume-chan/stream-extra";
-import type { ValueOrPromise } from "@yume-chan/struct";
 
-function nodeSocketToConnection(socket: Socket): AdbServerConnection {
+function nodeSocketToConnection(
+    socket: Socket,
+): AdbServerClient.ServerConnection {
     socket.setNoDelay(true);
 
     const closed = new Promise<void>((resolve) => {
@@ -35,16 +31,12 @@ function nodeSocketToConnection(socket: Socket): AdbServerConnection {
                 socket.resume();
             });
             socket.on("end", () => {
-                try {
-                    controller.close();
-                } catch (e) {
-                    // controller already closed
-                }
+                tryClose(controller);
             });
         }),
-        writable: new WritableStream<Uint8Array>({
-            write: async (chunk) => {
-                await new Promise<void>((resolve, reject) => {
+        writable: new MaybeConsumable.WritableStream<Uint8Array>({
+            write: (chunk) => {
+                return new Promise<void>((resolve, reject) => {
                     socket.write(chunk, (err) => {
                         if (err) {
                             reject(err);
@@ -64,7 +56,12 @@ function nodeSocketToConnection(socket: Socket): AdbServerConnection {
     };
 }
 
-export class AdbServerNodeTcpConnector implements AdbServerConnector {
+/**
+ * An `AdbServerClient.ServerConnector` implementation for Node.js.
+ */
+export class AdbServerNodeTcpConnector
+    implements AdbServerClient.ServerConnector
+{
     readonly spec: SocketConnectOpts;
 
     readonly #listeners = new Map<string, Server>();
@@ -74,8 +71,8 @@ export class AdbServerNodeTcpConnector implements AdbServerConnector {
     }
 
     async connect(
-        { unref }: AdbServerConnectionOptions = { unref: false },
-    ): Promise<AdbServerConnection> {
+        { unref }: AdbServerClient.ServerConnectionOptions = { unref: false },
+    ): Promise<AdbServerClient.ServerConnection> {
         const socket = new Socket();
         if (unref) {
             socket.unref();
@@ -99,9 +96,7 @@ export class AdbServerNodeTcpConnector implements AdbServerConnector {
                 await handler({
                     service: address!,
                     readable: connection.readable,
-                    writable: new WrapWritableStream(
-                        connection.writable,
-                    ).bePipedThroughFrom(new UnwrapConsumableStream()),
+                    writable: connection.writable,
                     get closed() {
                         return connection.closed;
                     },
@@ -121,7 +116,7 @@ export class AdbServerNodeTcpConnector implements AdbServerConnector {
             } else if (url.protocol === "unix:") {
                 server.listen(url.pathname);
             } else {
-                throw new Error(`Unsupported protocol ${url.protocol}`);
+                throw new TypeError(`Unsupported protocol ${url.protocol}`);
             }
         } else {
             server.listen();
@@ -134,14 +129,14 @@ export class AdbServerNodeTcpConnector implements AdbServerConnector {
 
         if (!address) {
             const info = server.address() as AddressInfo;
-            address = `tcp:${info.address}:${info.port}`;
+            address = `tcp:${info.port}`;
         }
 
         this.#listeners.set(address, server);
         return address;
     }
 
-    removeReverseTunnel(address: string): ValueOrPromise<void> {
+    removeReverseTunnel(address: string): MaybePromiseLike<void> {
         const server = this.#listeners.get(address);
         if (!server) {
             return;
@@ -150,7 +145,7 @@ export class AdbServerNodeTcpConnector implements AdbServerConnector {
         this.#listeners.delete(address);
     }
 
-    clearReverseTunnels(): ValueOrPromise<void> {
+    clearReverseTunnels(): MaybePromiseLike<void> {
         for (const server of this.#listeners.values()) {
             server.close();
         }

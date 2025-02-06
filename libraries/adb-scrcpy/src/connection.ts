@@ -1,5 +1,6 @@
 import type { Adb, AdbSocket } from "@yume-chan/adb";
 import { AdbReverseNotSupportedError, NOOP } from "@yume-chan/adb";
+import type { MaybePromiseLike } from "@yume-chan/async";
 import { delay } from "@yume-chan/async";
 import type { Disposable } from "@yume-chan/event";
 import type {
@@ -13,10 +14,9 @@ import {
     BufferedReadableStream,
     PushReadableStream,
 } from "@yume-chan/stream-extra";
-import type { ValueOrPromise } from "@yume-chan/struct";
 
 export interface AdbScrcpyConnectionOptions {
-    scid: number;
+    scid: string | undefined;
 
     video: boolean;
 
@@ -54,19 +54,19 @@ export abstract class AdbScrcpyConnection implements Disposable {
         this.socketName = this.getSocketName();
     }
 
-    initialize(): ValueOrPromise<void> {
+    initialize(): MaybePromiseLike<void> {
         // pure virtual method
     }
 
     protected getSocketName(): string {
         let socketName = "localabstract:" + SCRCPY_SOCKET_NAME_PREFIX;
-        if (this.options.scid !== undefined && this.options.scid >= 0) {
-            socketName += "_" + this.options.scid.toString(16).padStart(8, "0");
+        if (this.options.scid !== undefined) {
+            socketName += "_" + this.options.scid.padStart(8, "0");
         }
         return socketName;
     }
 
-    abstract getStreams(): ValueOrPromise<AdbScrcpyConnectionStreams>;
+    abstract getStreams(): MaybePromiseLike<AdbScrcpyConnectionStreams>;
 
     dispose(): void {
         // pure virtual method
@@ -94,6 +94,15 @@ export class AdbScrcpyForwardConnection extends AdbScrcpyConnection {
                     const buffered = new BufferedReadableStream(
                         stream.readable,
                     );
+                    // Skip the dummy byte
+                    // Google ADB forward tunnel listens on a socket on the computer,
+                    // when a client connects to that socket, Google ADB will forward
+                    // the connection to the socket on the device.
+                    // However, connecting to that socket will always succeed immediately,
+                    // which doesn't mean that Google ADB has connected to
+                    // the socket on the device.
+                    // Thus Scrcpy server sends a dummy byte to the socket, to let the client
+                    // know that the connection is truly established.
                     await buffered.readExactly(1);
                     return {
                         readable: buffered.release(),
@@ -101,7 +110,7 @@ export class AdbScrcpyForwardConnection extends AdbScrcpyConnection {
                     };
                 }
                 return stream;
-            } catch (e) {
+            } catch {
                 // Maybe the server is still starting
                 await delay(100);
             }

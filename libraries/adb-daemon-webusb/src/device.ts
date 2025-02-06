@@ -14,67 +14,41 @@ import type {
     WritableStream,
 } from "@yume-chan/stream-extra";
 import {
-    ConsumableWritableStream,
     DuplexStreamFactory,
+    MaybeConsumable,
     ReadableStream,
     pipeFrom,
 } from "@yume-chan/stream-extra";
 import type { ExactReadable } from "@yume-chan/struct";
-import { EMPTY_UINT8_ARRAY } from "@yume-chan/struct";
+import { EmptyUint8Array } from "@yume-chan/struct";
 
-import type { AdbDeviceFilter } from "./utils.js";
-import {
-    findUsbAlternateInterface,
-    getSerialNumber,
-    isErrorName,
-} from "./utils.js";
+import type { UsbInterfaceFilter, UsbInterfaceIdentifier } from "./utils.js";
+import { findUsbEndpoints, getSerialNumber, isErrorName } from "./utils.js";
 
 /**
  * The default filter for ADB devices, as defined by Google.
  */
-export const ADB_DEFAULT_DEVICE_FILTER = {
+export const AdbDefaultInterfaceFilter = {
     classCode: 0xff,
     subclassCode: 0x42,
     protocolCode: 1,
-} as const satisfies AdbDeviceFilter;
+} as const satisfies UsbInterfaceFilter;
 
-/**
- * Find the first pair of input and output endpoints from an alternate interface.
- *
- * ADB interface only has two endpoints, one for input and one for output.
- */
-function findUsbEndpoints(endpoints: USBEndpoint[]) {
-    if (endpoints.length === 0) {
-        throw new Error("No endpoints given");
+export function mergeDefaultAdbInterfaceFilter(
+    filters: USBDeviceFilter[] | undefined,
+): (USBDeviceFilter & UsbInterfaceFilter)[] {
+    if (!filters || filters.length === 0) {
+        return [AdbDefaultInterfaceFilter];
+    } else {
+        return filters.map((filter) => ({
+            ...filter,
+            classCode: filter.classCode ?? AdbDefaultInterfaceFilter.classCode,
+            subclassCode:
+                filter.subclassCode ?? AdbDefaultInterfaceFilter.subclassCode,
+            protocolCode:
+                filter.protocolCode ?? AdbDefaultInterfaceFilter.protocolCode,
+        }));
     }
-
-    let inEndpoint: USBEndpoint | undefined;
-    let outEndpoint: USBEndpoint | undefined;
-
-    for (const endpoint of endpoints) {
-        switch (endpoint.direction) {
-            case "in":
-                inEndpoint = endpoint;
-                if (outEndpoint) {
-                    return { inEndpoint, outEndpoint };
-                }
-                break;
-            case "out":
-                outEndpoint = endpoint;
-                if (inEndpoint) {
-                    return { inEndpoint, outEndpoint };
-                }
-                break;
-        }
-    }
-
-    if (!inEndpoint) {
-        throw new Error("No input endpoint found.");
-    }
-    if (!outEndpoint) {
-        throw new Error("No output endpoint found.");
-    }
-    throw new Error("unreachable");
 }
 
 class Uint8ArrayExactReadable implements ExactReadable {
@@ -188,7 +162,7 @@ export class AdbDaemonWebUsbConnection
         const zeroMask = outEndpoint.packetSize - 1;
         this.#writable = pipeFrom(
             duplex.createWritable(
-                new ConsumableWritableStream({
+                new MaybeConsumable.WritableStream({
                     write: async (chunk) => {
                         try {
                             await device.raw.transferOut(
@@ -200,13 +174,10 @@ export class AdbDaemonWebUsbConnection
                             // If the payload size is a multiple of the packet size,
                             // we need to send an empty packet to indicate the end,
                             // so the OS will send it to the device immediately.
-                            if (
-                                zeroMask &&
-                                (chunk.byteLength & zeroMask) === 0
-                            ) {
+                            if (zeroMask && (chunk.length & zeroMask) === 0) {
                                 await device.raw.transferOut(
                                     outEndpoint.endpointNumber,
-                                    EMPTY_UINT8_ARRAY,
+                                    EmptyUint8Array,
                                 );
                             }
                         } catch (e) {
@@ -255,7 +226,7 @@ export class AdbDaemonWebUsbConnection
                     );
                     packet.payload = new Uint8Array(result.data!.buffer);
                 } else {
-                    packet.payload = EMPTY_UINT8_ARRAY;
+                    packet.payload = EmptyUint8Array;
                 }
 
                 return packet;
@@ -263,7 +234,7 @@ export class AdbDaemonWebUsbConnection
         } catch (e) {
             // On Windows, disconnecting the device will cause `NetworkError` to be thrown,
             // even before the `disconnect` event is fired.
-            // We need to wait a little bit and check if the device is still connected.
+            // Wait a little while and check if the device is still connected.
             // https://github.com/WICG/webusb/issues/219
             if (isErrorName(e, "NetworkError")) {
                 await new Promise<void>((resolve) => {
@@ -274,8 +245,6 @@ export class AdbDaemonWebUsbConnection
 
                 if (closed) {
                     return undefined;
-                } else {
-                    throw e;
                 }
             }
 
@@ -285,7 +254,7 @@ export class AdbDaemonWebUsbConnection
 }
 
 export class AdbDaemonWebUsbDevice implements AdbDaemonDevice {
-    #filters: AdbDeviceFilter[];
+    #interface: UsbInterfaceIdentifier;
     #usbManager: USB;
 
     #raw: USBDevice;
@@ -310,22 +279,24 @@ export class AdbDaemonWebUsbDevice implements AdbDaemonDevice {
      */
     constructor(
         device: USBDevice,
-        filters: AdbDeviceFilter[] = [ADB_DEFAULT_DEVICE_FILTER],
+        interface_: UsbInterfaceIdentifier,
         usbManager: USB,
     ) {
         this.#raw = device;
         this.#serial = getSerialNumber(device);
-        this.#filters = filters;
+        this.#interface = interface_;
         this.#usbManager = usbManager;
     }
 
-    async #claimInterface(): Promise<[USBEndpoint, USBEndpoint]> {
+    async #claimInterface(): Promise<{
+        inEndpoint: USBEndpoint;
+        outEndpoint: USBEndpoint;
+    }> {
         if (!this.#raw.opened) {
             await this.#raw.open();
         }
 
-        const { configuration, interface_, alternate } =
-            findUsbAlternateInterface(this.#raw, this.#filters);
+        const { configuration, interface_, alternate } = this.#interface;
 
         if (
             this.#raw.configuration?.configurationValue !==
@@ -339,7 +310,15 @@ export class AdbDaemonWebUsbDevice implements AdbDaemonDevice {
         }
 
         if (!interface_.claimed) {
-            await this.#raw.claimInterface(interface_.interfaceNumber);
+            try {
+                await this.#raw.claimInterface(interface_.interfaceNumber);
+            } catch (e) {
+                if (isErrorName(e, "NetworkError")) {
+                    throw new AdbDaemonWebUsbDevice.DeviceBusyError(e);
+                }
+
+                throw e;
+            }
         }
 
         if (
@@ -351,23 +330,29 @@ export class AdbDaemonWebUsbDevice implements AdbDaemonDevice {
             );
         }
 
-        const { inEndpoint, outEndpoint } = findUsbEndpoints(
-            alternate.endpoints,
-        );
-        return [inEndpoint, outEndpoint];
+        return findUsbEndpoints(alternate.endpoints);
     }
 
     /**
-     * Claim the device and create a pair of `AdbPacket` streams to the ADB interface.
-     * @returns The pair of `AdbPacket` streams.
+     * Open the device and create a new connection to the ADB Daemon.
      */
     async connect(): Promise<AdbDaemonWebUsbConnection> {
-        const [inEndpoint, outEndpoint] = await this.#claimInterface();
+        const { inEndpoint, outEndpoint } = await this.#claimInterface();
         return new AdbDaemonWebUsbConnection(
             this,
             inEndpoint,
             outEndpoint,
             this.#usbManager,
         );
+    }
+}
+
+export namespace AdbDaemonWebUsbDevice {
+    export class DeviceBusyError extends Error {
+        constructor(cause?: Error) {
+            super("The device is already in used by another program", {
+                cause,
+            });
+        }
     }
 }

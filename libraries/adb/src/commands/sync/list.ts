@@ -1,4 +1,5 @@
-import Struct from "@yume-chan/struct";
+import type { StructValue } from "@yume-chan/struct";
+import { string, struct, u32 } from "@yume-chan/struct";
 
 import { AdbSyncRequestId, adbSyncWriteRequest } from "./request.js";
 import { AdbSyncResponseId, adbSyncReadResponses } from "./response.js";
@@ -14,23 +15,27 @@ export interface AdbSyncEntry extends AdbSyncStat {
     name: string;
 }
 
-export const AdbSyncEntryResponse = new Struct({ littleEndian: true })
-    .concat(AdbSyncLstatResponse)
-    .uint32("nameLength")
-    .string("name", { lengthField: "nameLength" })
-    .extra({ id: AdbSyncResponseId.Entry as const });
+export const AdbSyncEntryResponse = /* #__PURE__ */ (() =>
+    struct(
+        {
+            ...AdbSyncLstatResponse.fields,
+            name: string(u32),
+        },
+        { littleEndian: true, extra: AdbSyncLstatResponse.extra },
+    ))();
 
-export type AdbSyncEntryResponse =
-    (typeof AdbSyncEntryResponse)["TDeserializeResult"];
+export type AdbSyncEntryResponse = StructValue<typeof AdbSyncEntryResponse>;
 
-export const AdbSyncEntry2Response = new Struct({ littleEndian: true })
-    .concat(AdbSyncStatResponse)
-    .uint32("nameLength")
-    .string("name", { lengthField: "nameLength" })
-    .extra({ id: AdbSyncResponseId.Entry2 as const });
+export const AdbSyncEntry2Response = /* #__PURE__ */ (() =>
+    struct(
+        {
+            ...AdbSyncStatResponse.fields,
+            name: string(u32),
+        },
+        { littleEndian: true, extra: AdbSyncStatResponse.extra },
+    ))();
 
-export type AdbSyncEntry2Response =
-    (typeof AdbSyncEntry2Response)["TDeserializeResult"];
+export type AdbSyncEntry2Response = StructValue<typeof AdbSyncEntry2Response>;
 
 export async function* adbSyncOpenDirV2(
     socket: AdbSyncSocket,

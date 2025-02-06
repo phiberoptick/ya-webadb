@@ -91,153 +91,17 @@ export function* annexBSplitNalu(buffer: Uint8Array): Generator<Uint8Array> {
     yield buffer.subarray(start, buffer.length);
 }
 
-/**
- * Remove emulation prevention bytes from a H.264/H.265 NAL Unit.
- *
- * The input is not modified.
- * If the input doesn't contain any emulation prevention bytes,
- * the input is returned as-is.
- * Otherwise, a new `Uint8Array` is created and returned.
- */
-export function naluRemoveEmulation(buffer: Uint8Array) {
-    // output will be created when first emulation prevention byte is found
-    let output: Uint8Array | undefined;
-    let outputOffset = 0;
-
-    let zeroCount = 0;
-    let inEmulation = false;
-
-    let i = 0;
-    scan: for (; i < buffer.length; i += 1) {
-        const byte = buffer[i]!;
-
-        if (byte === 0x00) {
-            zeroCount += 1;
-            continue;
-        }
-
-        // Current byte is not zero
-        const prevZeroCount = zeroCount;
-        zeroCount = 0;
-
-        if (prevZeroCount < 2) {
-            // zero or one `0x00`s are acceptable
-            continue;
-        }
-
-        if (byte === 0x01) {
-            // Unexpected start code
-            throw new Error("Invalid data");
-        }
-
-        if (prevZeroCount > 2) {
-            // Too much `0x00`s
-            throw new Error("Invalid data");
-        }
-
-        switch (byte) {
-            case 0x02:
-                // Didn't find why, but 7.4.1 NAL unit semantics forbids `0x000002` appearing in NAL units
-                throw new Error("Invalid data");
-            case 0x03:
-                // `0x000003` is the "emulation_prevention_three_byte"
-                // `0x00000300`, `0x00000301`, `0x00000302` and `0x00000303` represent
-                // `0x000000`, `0x000001`, `0x000002` and `0x000003` respectively
-                inEmulation = true;
-
-                // Create output and copy the data before the emulation prevention byte
-                // Output size is unknown, so we use the input size as an upper bound
-                output = new Uint8Array(buffer.length - 1);
-                output.set(buffer.subarray(0, i));
-                outputOffset = i;
-                i += 1;
-                break scan;
-            default:
-                // `0x000004` or larger are as-is
-                break;
-        }
-    }
-
-    if (!output) {
-        return buffer;
-    }
-
-    // Continue at the byte after the emulation prevention byte
-    for (; i < buffer.length; i += 1) {
-        const byte = buffer[i]!;
-
-        output[outputOffset] = byte;
-        outputOffset += 1;
-
-        if (inEmulation) {
-            if (byte > 0x03) {
-                // `0x00000304` or larger are invalid
-                throw new Error("Invalid data");
-            }
-
-            // `00000300000300` results in `0000000000` (both `0x03` are removed)
-            // which means the `0x00` after `0x03` also counts
-            if (byte === 0x00) {
-                zeroCount += 1;
-            }
-
-            inEmulation = false;
-            continue;
-        }
-
-        if (byte === 0x00) {
-            zeroCount += 1;
-            continue;
-        }
-
-        const prevZeroCount = zeroCount;
-        zeroCount = 0;
-
-        if (prevZeroCount < 2) {
-            // zero or one `0x00`s are acceptable
-            continue;
-        }
-
-        if (byte === 0x01) {
-            // Unexpected start code
-            throw new Error("Invalid data");
-        }
-
-        if (prevZeroCount > 2) {
-            // Too much `0x00`s
-            throw new Error("Invalid data");
-        }
-
-        switch (byte) {
-            case 0x02:
-                // Didn't find why, but 7.4.1 NAL unit semantics forbids `0x000002` appearing in NAL units
-                throw new Error("Invalid data");
-            case 0x03:
-                // `0x000003` is the "emulation_prevention_three_byte"
-                // `0x00000300`, `0x00000301`, `0x00000302` and `0x00000303` represent
-                // `0x000000`, `0x000001`, `0x000002` and `0x000003` respectively
-                inEmulation = true;
-
-                // Remove the emulation prevention byte
-                outputOffset -= 1;
-                break;
-            default:
-                // `0x000004` or larger are as-is
-                break;
-        }
-    }
-
-    return output.subarray(0, outputOffset);
-}
-
 export class NaluSodbBitReader {
     readonly #nalu: Uint8Array;
+    // logical length is `#byteLength * 8 + (7 - #stopBitIndex)`
     readonly #byteLength: number;
     readonly #stopBitIndex: number;
 
     #zeroCount = 0;
-    #bytePosition = -1;
-    #bitPosition = -1;
+
+    // logical position is `#bytePosition * 8 + (7 - #bitPosition)`
+    #bytePosition = 0;
+    #bitPosition = 7;
     #byte = 0;
 
     get byteLength() {
@@ -258,14 +122,15 @@ export class NaluSodbBitReader {
 
     get ended() {
         return (
-            this.#bytePosition === this.#byteLength &&
-            this.#bitPosition === this.#stopBitIndex
+            this.#bytePosition >= this.#byteLength &&
+            this.#bitPosition <= this.#stopBitIndex
         );
     }
 
     constructor(nalu: Uint8Array) {
         this.#nalu = nalu;
 
+        // Search for the last bit being `1`, also known as the stop bit
         for (let i = nalu.length - 1; i >= 0; i -= 1) {
             if (this.#nalu[i] === 0) {
                 continue;
@@ -276,7 +141,7 @@ export class NaluSodbBitReader {
                 if (((byte >> j) & 1) === 1) {
                     this.#byteLength = i;
                     this.#stopBitIndex = j;
-                    this.#readByte();
+                    this.#loadByte();
                     return;
                 }
             }
@@ -285,15 +150,22 @@ export class NaluSodbBitReader {
         throw new Error("Stop bit not found");
     }
 
-    #readByte() {
+    #loadByte() {
         this.#byte = this.#nalu[this.#bytePosition]!;
+
+        // If the current sequence is `0x000003`, skip to the next byte.
+        // `annexBSplitNalu` had validated the input, so skip the check here
         if (this.#zeroCount === 2 && this.#byte === 3) {
             this.#zeroCount = 0;
             this.#bytePosition += 1;
-            this.#readByte();
+            // Call `#loadByte` again, because if the next byte is `0x00`,
+            // it need to be counted in `#zeroCount` as well.
+            this.#loadByte();
             return;
         }
 
+        // `0x00000301` becomes `0x000001`, so only the `0x03` byte needs to be skipped
+        // All `0x00` bytes are returned as-is
         if (this.#byte === 0) {
             this.#zeroCount += 1;
         } else {
@@ -302,18 +174,19 @@ export class NaluSodbBitReader {
     }
 
     next() {
-        if (this.#bitPosition === -1) {
-            this.#bitPosition = 7;
-            this.#bytePosition += 1;
-            this.#readByte();
-        }
-
         if (this.ended) {
             throw new Error("Bit index out of bounds");
         }
 
         const value = (this.#byte >> this.#bitPosition) & 1;
+
         this.#bitPosition -= 1;
+        if (this.#bitPosition < 0) {
+            this.#bytePosition += 1;
+            this.#bitPosition = 7;
+            this.#loadByte();
+        }
+
         return value;
     }
 
@@ -329,10 +202,50 @@ export class NaluSodbBitReader {
         return result;
     }
 
-    skip(length: number) {
-        for (let i = 0; i < length; i += 1) {
-            this.next();
+    /**
+     * Throws an error if the current position is invalid for `skip`.
+     *
+     * Usually it will throw if `ended` is `true`,
+     * except when the bit position is at the stop bit,
+     * in which case `ended` will be `true`, but it won't throw.
+     * `skip` can skip all remaining bits, and stop at the end position.
+     * The next `next` call will throw since there is no more bits to read.
+     */
+    #checkSkipPosition() {
+        if (
+            this.#bytePosition >= this.#byteLength &&
+            this.#bitPosition < this.#stopBitIndex
+        ) {
+            throw new Error("Bit index out of bounds");
         }
+    }
+
+    skip(length: number) {
+        if (length <= this.#bitPosition + 1) {
+            this.#bitPosition -= length;
+            this.#checkSkipPosition();
+            return;
+        }
+
+        // Because of emulation prevention bytes,
+        // we don't know how many bits are left in the NAL,
+        // nor how many bits should be skipped.
+        // So we need to check each byte.
+
+        length -= this.#bitPosition + 1;
+        this.#bytePosition += 1;
+        this.#bitPosition = 7;
+        this.#loadByte();
+        this.#checkSkipPosition();
+
+        for (; length >= 8; length -= 8) {
+            this.#bytePosition += 1;
+            this.#loadByte();
+            this.#checkSkipPosition();
+        }
+
+        this.#bitPosition = 7 - length;
+        this.#checkSkipPosition();
     }
 
     decodeExponentialGolombNumber(): number {

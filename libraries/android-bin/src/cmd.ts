@@ -10,37 +10,49 @@ import {
     AdbSubprocessNoneProtocol,
     AdbSubprocessShellProtocol,
 } from "@yume-chan/adb";
-import { ConcatStringStream, DecodeUtf8Stream } from "@yume-chan/stream-extra";
+import { ConcatStringStream, TextDecoderStream } from "@yume-chan/stream-extra";
 
 export class Cmd extends AdbCommandBase {
     #supportsShellV2: boolean;
-    get supportsShellV2() {
+    get supportsShellV2(): boolean {
         return this.#supportsShellV2;
     }
 
     #supportsCmd: boolean;
-    get supportsCmd() {
+    get supportsCmd(): boolean {
         return this.#supportsCmd;
     }
 
     #supportsAbb: boolean;
-    get supportsAbb() {
+    get supportsAbb(): boolean {
         return this.#supportsAbb;
     }
 
     #supportsAbbExec: boolean;
-    get supportsAbbExec() {
+    get supportsAbbExec(): boolean {
         return this.#supportsAbbExec;
     }
 
     constructor(adb: Adb) {
         super(adb);
-        this.#supportsShellV2 = adb.supportsFeature(AdbFeature.ShellV2);
-        this.#supportsCmd = adb.supportsFeature(AdbFeature.Cmd);
-        this.#supportsAbb = adb.supportsFeature(AdbFeature.Abb);
-        this.#supportsAbbExec = adb.supportsFeature(AdbFeature.AbbExec);
+        this.#supportsShellV2 = adb.canUseFeature(AdbFeature.ShellV2);
+        this.#supportsCmd = adb.canUseFeature(AdbFeature.Cmd);
+        this.#supportsAbb = adb.canUseFeature(AdbFeature.Abb);
+        this.#supportsAbbExec = adb.canUseFeature(AdbFeature.AbbExec);
     }
 
+    /**
+     * Spawn a new `cmd` command. It will use ADB's `abb` command if available.
+     *
+     * @param shellProtocol
+     * Whether to use shell protocol. If `true`, `stdout` and `stderr` will be separated.
+     *
+     * `cmd` doesn't use PTY, so even when shell protocol is used,
+     * resizing terminal size and closing `stdin` are not supported.
+     * @param command The command to run.
+     * @param args The arguments to pass to the command.
+     * @returns An `AdbSubprocessProtocol` that provides output streams.
+     */
     async spawn(
         shellProtocol: boolean,
         command: string,
@@ -84,10 +96,10 @@ export class Cmd extends AdbCommandBase {
 
         const [stdout, stderr, exitCode] = await Promise.all([
             process.stdout
-                .pipeThrough(new DecodeUtf8Stream())
+                .pipeThrough(new TextDecoderStream())
                 .pipeThrough(new ConcatStringStream()),
             process.stderr
-                .pipeThrough(new DecodeUtf8Stream())
+                .pipeThrough(new TextDecoderStream())
                 .pipeThrough(new ConcatStringStream()),
             process.exit,
         ]);

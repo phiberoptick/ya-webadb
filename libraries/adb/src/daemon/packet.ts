@@ -1,32 +1,43 @@
-import { ConsumableTransformStream } from "@yume-chan/stream-extra";
-import Struct from "@yume-chan/struct";
+import { Consumable, TransformStream } from "@yume-chan/stream-extra";
+import type { StructInit, StructValue } from "@yume-chan/struct";
+import { buffer, s32, struct, u32 } from "@yume-chan/struct";
 
-export enum AdbCommand {
-    Auth = 0x48545541, // 'AUTH'
-    Close = 0x45534c43, // 'CLSE'
-    Connect = 0x4e584e43, // 'CNXN'
-    Okay = 0x59414b4f, // 'OKAY'
-    Open = 0x4e45504f, // 'OPEN'
-    Write = 0x45545257, // 'WRTE'
-}
+export const AdbCommand = {
+    Auth: 0x48545541, // 'AUTH'
+    Close: 0x45534c43, // 'CLSE'
+    Connect: 0x4e584e43, // 'CNXN'
+    Okay: 0x59414b4f, // 'OKAY'
+    Open: 0x4e45504f, // 'OPEN'
+    Write: 0x45545257, // 'WRTE'
+} as const;
 
-export const AdbPacketHeader = new Struct({ littleEndian: true })
-    .uint32("command")
-    .uint32("arg0")
-    .uint32("arg1")
-    .uint32("payloadLength")
-    .uint32("checksum")
-    .int32("magic");
+export type AdbCommand = (typeof AdbCommand)[keyof typeof AdbCommand];
 
-export type AdbPacketHeader = (typeof AdbPacketHeader)["TDeserializeResult"];
+export const AdbPacketHeader = struct(
+    {
+        command: u32,
+        arg0: u32,
+        arg1: u32,
+        payloadLength: u32,
+        checksum: u32,
+        magic: s32,
+    },
+    { littleEndian: true },
+);
 
-type AdbPacketHeaderInit = (typeof AdbPacketHeader)["TInit"];
+export type AdbPacketHeader = StructValue<typeof AdbPacketHeader>;
 
-export const AdbPacket = new Struct({ littleEndian: true })
-    .concat(AdbPacketHeader)
-    .uint8Array("payload", { lengthField: "payloadLength" });
+type AdbPacketHeaderInit = StructInit<typeof AdbPacketHeader>;
 
-export type AdbPacket = (typeof AdbPacket)["TDeserializeResult"];
+export const AdbPacket = struct(
+    /* #__PURE__ */ (() => ({
+        ...AdbPacketHeader.fields,
+        payload: buffer("payloadLength"),
+    }))(),
+    { littleEndian: true },
+);
+
+export type AdbPacket = StructValue<typeof AdbPacket>;
 
 /**
  * `AdbPacketData` contains all the useful fields of `AdbPacket`.
@@ -39,36 +50,44 @@ export type AdbPacket = (typeof AdbPacket)["TDeserializeResult"];
  * so `AdbSocket#writable#write` only needs `AdbPacketData`.
  */
 export type AdbPacketData = Omit<
-    (typeof AdbPacket)["TInit"],
+    StructInit<typeof AdbPacket>,
     "checksum" | "magic"
 >;
 
-export type AdbPacketInit = (typeof AdbPacket)["TInit"];
+export type AdbPacketInit = StructInit<typeof AdbPacket>;
 
 export function calculateChecksum(payload: Uint8Array): number {
     return payload.reduce((result, item) => result + item, 0);
 }
 
-export class AdbPacketSerializeStream extends ConsumableTransformStream<
-    AdbPacketInit,
-    Uint8Array
+export class AdbPacketSerializeStream extends TransformStream<
+    Consumable<AdbPacketInit>,
+    Consumable<Uint8Array>
 > {
     constructor() {
         const headerBuffer = new Uint8Array(AdbPacketHeader.size);
         super({
             transform: async (chunk, controller) => {
-                const init = chunk as AdbPacketInit & AdbPacketHeaderInit;
-                init.payloadLength = init.payload.byteLength;
+                await chunk.tryConsume(async (chunk) => {
+                    const init = chunk as AdbPacketInit & AdbPacketHeaderInit;
+                    init.payloadLength = init.payload.length;
 
-                AdbPacketHeader.serialize(init, headerBuffer);
-                await controller.enqueue(headerBuffer);
+                    AdbPacketHeader.serialize(init, headerBuffer);
+                    await Consumable.ReadableStream.enqueue(
+                        controller,
+                        headerBuffer,
+                    );
 
-                if (init.payload.byteLength) {
-                    // USB protocol preserves packet boundaries,
-                    // so we must write payload separately as native ADB does,
-                    // otherwise the read operation on device will fail.
-                    await controller.enqueue(init.payload);
-                }
+                    if (init.payloadLength) {
+                        // USB protocol preserves packet boundaries,
+                        // so we must write payload separately as native ADB does,
+                        // otherwise the read operation on device will fail.
+                        await Consumable.ReadableStream.enqueue(
+                            controller,
+                            init.payload,
+                        );
+                    }
+                });
             },
         });
     }

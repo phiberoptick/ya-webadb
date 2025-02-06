@@ -3,5 +3,11 @@
         {
             "path": "./tsconfig.build.json"
         },
+        {
+            "path": "./tsconfig.test.json"
+        },
+        {
+            "path": "../adb/tsconfig.build.json"
+        }
     ]
 }

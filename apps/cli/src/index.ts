@@ -4,12 +4,9 @@
 
 import "source-map-support/register.js";
 
-import { Adb, AdbServerClient } from "@yume-chan/adb";
+import { Adb, AdbServerClient, Ref } from "@yume-chan/adb";
 import { AdbServerNodeTcpConnector } from "@yume-chan/adb-server-node-tcp";
-import {
-    ConsumableWritableStream,
-    WritableStream,
-} from "@yume-chan/stream-extra";
+import { WritableStream } from "@yume-chan/stream-extra";
 import { program } from "commander";
 
 program
@@ -111,18 +108,18 @@ async function createAdb(options: DeviceCommandOptions) {
                   usb: true,
               }
             : options.e
-            ? {
-                  tcp: true,
-              }
-            : options.s !== undefined
-            ? {
-                  serial: options.s,
-              }
-            : options.t !== undefined
-            ? {
-                  transportId: options.t,
-              }
-            : undefined,
+              ? {
+                    tcp: true,
+                }
+              : options.s !== undefined
+                ? {
+                      serial: options.s,
+                  }
+                : options.t !== undefined
+                  ? {
+                        transportId: options.t,
+                    }
+                  : undefined,
     );
     const adb = new Adb(transport);
     return adb;
@@ -135,6 +132,8 @@ createDeviceCommand("shell [args...]")
     )
     .configureHelp({ showGlobalOptions: true })
     .action(async (args: string[], options: DeviceCommandOptions) => {
+        const ref = new Ref();
+
         const adb = await createAdb(options);
         const shell = await adb.subprocess.shell(args);
 
@@ -142,7 +141,7 @@ createDeviceCommand("shell [args...]")
 
         process.stdin.setRawMode(true);
         process.stdin.on("data", (data: Uint8Array) => {
-            ConsumableWritableStream.write(stdinWriter, data).catch((e) => {
+            stdinWriter.write(data).catch((e) => {
                 console.error(e);
                 process.exit(1);
             });
@@ -172,6 +171,8 @@ createDeviceCommand("shell [args...]")
                 process.exit(1);
             },
         );
+
+        ref.unref();
     });
 
 createDeviceCommand("logcat [args...]")
