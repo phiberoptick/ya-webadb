@@ -1,5 +1,5 @@
 import type { Adb, AdbNoneProtocolProcess } from "@yume-chan/adb";
-import { AdbServiceBase, escapeArg } from "@yume-chan/adb";
+import { AdbServiceBase } from "@yume-chan/adb";
 import { SplitStringStream, TextDecoderStream } from "@yume-chan/stream-extra";
 
 import { Cmd } from "./cmd/index.js";
@@ -43,13 +43,15 @@ export class ActivityManager extends AdbServiceBase {
     ): Promise<void> {
         // `am start` and `am start-activity` are the same,
         // but `am start-activity` was added in Android 8.
-        let args = buildArguments(
+        const args = buildArguments(
             [ActivityManager.ServiceName, "start", "-W"],
             options,
             START_ACTIVITY_OPTIONS_MAP,
         );
 
-        args = args.concat(options.intent.build().map(escapeArg));
+        for (const arg of options.intent.build()) {
+            args.push(arg);
+        }
 
         // `cmd activity` doesn't support `start` command on Android 7.
         let process: AdbNoneProtocolProcess;

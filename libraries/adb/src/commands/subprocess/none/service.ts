@@ -1,4 +1,5 @@
 import type { Adb } from "../../../adb.js";
+import { escapeArg } from "../utils.js";
 
 import { AdbNoneProtocolProcessImpl } from "./process.js";
 import { AdbNoneProtocolPtyProcess } from "./pty.js";
@@ -18,7 +19,7 @@ export class AdbNoneProtocolSubprocessService {
         // `shell,raw:${command}` also triggers raw mode,
         // But is not supported on Android version <7.
         const socket = await this.#adb.createSocket(
-            `exec:${command.join(" ")}`,
+            `exec:${command.map(escapeArg).join(" ")}`,
         );
 
         if (signal?.aborted) {

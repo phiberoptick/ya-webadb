@@ -2,7 +2,6 @@ import type { MaybeConsumable, ReadableStream } from "@yume-chan/stream-extra";
 
 import type { Adb, AdbSocket } from "../../adb.js";
 import { AdbFeature } from "../../features.js";
-import { escapeArg } from "../subprocess/index.js";
 
 import type { AdbSyncEntry } from "./list.js";
 import { adbSyncOpenDir } from "./list.js";
@@ -152,7 +151,7 @@ export class AdbSync {
             // Ignore the result.
             // TODO: sync: test push mkdir workaround (need an Android 8 device)
             await this._adb.subprocess.noneProtocol
-                .spawn(["mkdir", "-p", escapeArg(dirname(options.filename))])
+                .spawn(["mkdir", "-p", dirname(options.filename)])
                 .wait();
         }
 

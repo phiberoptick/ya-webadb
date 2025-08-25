@@ -13,7 +13,6 @@ import {
     AdbSubprocessService,
     AdbSync,
     AdbTcpIpService,
-    escapeArg,
     framebuffer,
 } from "./commands/index.js";
 import type { AdbFeature } from "./features.js";
@@ -147,11 +146,11 @@ export class Adb implements Closeable {
         if (Array.isArray(filenames)) {
             for (const filename of filenames) {
                 // https://github.com/microsoft/typescript/issues/17002
-                args.push(escapeArg(filename as string));
+                args.push(filename as string);
             }
         } else {
             // https://github.com/microsoft/typescript/issues/17002
-            args.push(escapeArg(filenames as string));
+            args.push(filenames as string);
         }
         // https://android.googlesource.com/platform/packages/modules/adb/+/1a0fb8846d4e6b671c8aa7f137a8c21d7b248716/client/adb_install.cpp#984
         args.push("</dev/null");

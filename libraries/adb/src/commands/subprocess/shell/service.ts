@@ -1,5 +1,6 @@
 import type { Adb } from "../../../adb.js";
 import { AdbFeature } from "../../../features.js";
+import { escapeArg } from "../utils.js";
 
 import { AdbShellProtocolProcessImpl } from "./process.js";
 import { AdbShellProtocolPtyProcess } from "./pty.js";
@@ -21,7 +22,7 @@ export class AdbShellProtocolSubprocessService {
 
     spawn = adbShellProtocolSpawner(async (command, signal) => {
         const socket = await this.#adb.createSocket(
-            `shell,v2,raw:${command.join(" ")}`,
+            `shell,v2,raw:${command.map(escapeArg).join(" ")}`,
         );
 
         if (signal?.aborted) {

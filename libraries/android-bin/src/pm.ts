@@ -5,7 +5,7 @@
 // cspell:ignore dexopt
 
 import type { Adb, AdbNoneProtocolProcess } from "@yume-chan/adb";
-import { AdbServiceBase, escapeArg } from "@yume-chan/adb";
+import { AdbServiceBase } from "@yume-chan/adb";
 import type { MaybeConsumable, ReadableStream } from "@yume-chan/stream-extra";
 import {
     ConcatStringStream,
@@ -252,7 +252,7 @@ function buildInstallArguments(
                 args.push(option.name, value.toString());
                 break;
             case "string":
-                args.push(option.name, escapeArg(value));
+                args.push(option.name, value);
                 break;
             default:
                 throw new Error(
@@ -290,7 +290,9 @@ export class PackageManager extends AdbServiceBase {
         const args = buildInstallArguments("install", options, this.#apiLevel);
         args[0] = PackageManager.CommandName;
         // WIP: old version of pm doesn't support multiple apks
-        args.push(...apks.map(escapeArg));
+        for (const apk of apks) {
+            args.push(apk);
+        }
 
         // Starting from Android 7, `pm` becomes a wrapper to `cmd package`.
         // The benefit of `cmd package` is it starts faster than the old `pm`,
@@ -436,7 +438,7 @@ export class PackageManager extends AdbServiceBase {
         );
         // `PACKAGE_MANAGER_LIST_PACKAGES_OPTIONS_MAP` doesn't have `filter`
         if (options?.filter) {
-            args.push(escapeArg(options.filter));
+            args.push(options.filter);
         }
 
         const process = await this.#cmd.spawn(args);
@@ -477,7 +479,7 @@ export class PackageManager extends AdbServiceBase {
         if (options?.user !== undefined) {
             args.push("--user", options.user.toString());
         }
-        args.push(escapeArg(packageName));
+        args.push(packageName);
 
         // `cmd package` doesn't support `path` command on Android 7 and 8.
         let process: AdbNoneProtocolProcess;
@@ -510,14 +512,16 @@ export class PackageManager extends AdbServiceBase {
         packageName: string,
         options?: Optional<PackageManagerUninstallOptions>,
     ): Promise<void> {
-        let args = buildArguments(
+        const args = buildArguments(
             [PackageManager.ServiceName, "uninstall"],
             options,
             PACKAGE_MANAGER_UNINSTALL_OPTIONS_MAP,
         );
-        args.push(escapeArg(packageName));
+        args.push(packageName);
         if (options?.splitNames) {
-            args = args.concat(options.splitNames.map(escapeArg));
+            for (const splitName of options.splitNames) {
+                args.push(splitName);
+            }
         }
 
         const output = await this.#cmd
@@ -533,13 +537,15 @@ export class PackageManager extends AdbServiceBase {
     async resolveActivity(
         options: PackageManagerResolveActivityOptions,
     ): Promise<string | undefined> {
-        let args = buildArguments(
+        const args = buildArguments(
             [PackageManager.ServiceName, "resolve-activity", "--components"],
             options,
             PACKAGE_MANAGER_RESOLVE_ACTIVITY_OPTIONS_MAP,
         );
 
-        args = args.concat(options.intent.build().map(escapeArg));
+        for (const arg of options.intent.build()) {
+            args.push(arg);
+        }
 
         const output = await this.#cmd
             .spawn(args)
@@ -609,8 +615,8 @@ export class PackageManager extends AdbServiceBase {
             PackageManager.CommandName,
             "install-write",
             sessionId.toString(),
-            escapeArg(splitName),
-            escapeArg(path),
+            splitName,
+            path,
         ];
 
         // Similar to `install`, must use `adb.subprocess` so it can read `path`
@@ -630,7 +636,7 @@ export class PackageManager extends AdbServiceBase {
             "-S",
             size.toString(),
             sessionId.toString(),
-            escapeArg(splitName),
+            splitName,
             "-",
         ];
 
