@@ -1,7 +1,7 @@
 import * as assert from "node:assert";
 import { describe, it } from "node:test";
 
-import { escapeArg } from "./utils.js";
+import { escapeArg, splitCommand } from "./utils.js";
 
 describe("escapeArg", () => {
     it("should escape single quotes", () => {
@@ -40,5 +40,20 @@ describe("escapeArg", () => {
         assert.equal(escapeArg("abc\\"), String.raw`'abc\'`);
         assert.equal(escapeArg("abc("), String.raw`'abc('`);
         assert.equal(escapeArg("abc)"), String.raw`'abc)'`);
+    });
+});
+
+describe("splitCommand", () => {
+    it("should split command", () => {
+        assert.deepEqual(splitCommand(""), []);
+        assert.deepEqual(splitCommand("abc"), ["abc"]);
+        assert.deepEqual(splitCommand("abc def"), ["abc", "def"]);
+        assert.deepEqual(splitCommand("abc 'def'"), ["abc", "def"]);
+        assert.deepEqual(splitCommand("abc 'def' ghi"), ["abc", "def", "ghi"]);
+        assert.deepEqual(splitCommand("abc 'def' 'ghi'"), [
+            "abc",
+            "def",
+            "ghi",
+        ]);
     });
 });

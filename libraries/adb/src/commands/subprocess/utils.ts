@@ -26,20 +26,20 @@ export function splitCommand(command: string): string[] {
     const result: string[] = [];
     let quote: string | undefined;
     let isEscaped = false;
-    let start = 0;
+    let value = "";
 
-    for (let i = 0, len = command.length; i < len; i += 1) {
+    for (const char of command) {
         if (isEscaped) {
+            value += char;
             isEscaped = false;
             continue;
         }
 
-        const char = command.charAt(i);
         switch (char) {
             case " ":
-                if (!quote && i !== start) {
-                    result.push(command.substring(start, i));
-                    start = i + 1;
+                if (!quote && value) {
+                    result.push(value);
+                    value = "";
                 }
                 break;
             case "'":
@@ -53,11 +53,14 @@ export function splitCommand(command: string): string[] {
             case "\\":
                 isEscaped = true;
                 break;
+            default:
+                value += char;
+                break;
         }
     }
 
-    if (start < command.length) {
-        result.push(command.substring(start));
+    if (value) {
+        result.push(value);
     }
 
     return result;
