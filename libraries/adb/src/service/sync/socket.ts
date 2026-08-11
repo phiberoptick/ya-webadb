@@ -21,7 +21,15 @@ import { ResponseId } from "./id/index.js";
 
 const NumberRequest = struct({ id: u32, arg: u32 }, { littleEndian: true });
 
-class AdbSyncError extends Error {}
+const AdbSyncErrorBrand = Symbol.for("AdbSyncError.brand");
+
+class AdbSyncError extends Error {
+    [AdbSyncErrorBrand] = true;
+
+    static override [Symbol.hasInstance](value: unknown) {
+        return !!(value as AdbSyncError | undefined)?.[AdbSyncErrorBrand];
+    }
+}
 export { AdbSyncError as Error };
 
 const FailResponse = struct(
