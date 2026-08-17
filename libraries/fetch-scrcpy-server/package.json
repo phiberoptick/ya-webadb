@@ -27,9 +27,6 @@
     "main": "index.js",
     "types": "index.d.ts",
     "sideEffects": false,
-    "dependencies": {
-        "gh-release-fetch": "^4.0.3"
-    },
     "devDependencies": {
         "@types/node": "^26.1.1"
     }
