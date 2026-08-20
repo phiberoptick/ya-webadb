@@ -44,10 +44,7 @@ describe("adbNoneProtocolSpawner", () => {
         assert.strictEqual(waitSettled, false);
 
         killFinished.resolve();
-        assert.deepStrictEqual(
-            await waitPromise,
-            new Uint8Array([1, 2, 3]),
-        );
+        assert.deepStrictEqual(await waitPromise, new Uint8Array([1, 2, 3]));
         assert.strictEqual(kill.mock.callCount(), 1);
     });
 

@@ -78,7 +78,9 @@ export function adbShellProtocolSpawner(
                         stdout,
                         stderr,
                         exitCode,
-                    } satisfies AdbShellProtocolSpawner.WaitResult<Uint8Array[]>;
+                    } satisfies AdbShellProtocolSpawner.WaitResult<
+                        Uint8Array[]
+                    >;
                 } finally {
                     await process.kill();
                 }
